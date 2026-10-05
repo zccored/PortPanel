@@ -29,7 +29,7 @@
 
 ### 方式一：用打包版（普通用户推荐）
 
-1. 到 [Releases](https://github.com/zccored/Download_To_Draw/releases) 下载
+1. 到 [Releases](https://github.com/zccored/PortPanel/releases) 下载
    `PortPanel-vX.Y.Z-win64.zip`；
 2. 解压到任意目录（**别放在 `C:\Program Files` 之类需要管理员权限的地方** ——
    程序要往自己的 `data/` 里写配置与日志）；
@@ -40,8 +40,8 @@
 ### 方式二：源码运行
 
 ```bash
-git clone https://github.com/zccored/Download_To_Draw.git
-cd Download_To_Draw
+git clone https://github.com/zccored/PortPanel.git
+cd PortPanel
 python -m pip install -r requirements.txt
 python port_panel.py
 ```
@@ -171,7 +171,7 @@ python port_panel.py
 ## 目录结构
 
 ```
-Download_To_Draw/
+PortPanel/
 ├─ port_panel.py            # 独立启动入口（打包也是它）
 ├─ img_server.py            # 画板主体（节点、执行引擎、下载器、悬停提示、仪表盘…）
 ├─ api_config_dialog.py     # 图源配置 / 请求头 / Cookie / 调试
@@ -265,7 +265,7 @@ drawing *is* one download pipeline.
 ### Option 1 — packaged build (recommended for end users)
 
 1. Grab `PortPanel-vX.Y.Z-win64.zip` from
-   [Releases](https://github.com/zccored/Download_To_Draw/releases);
+   [Releases](https://github.com/zccored/PortPanel/releases);
 2. Unzip anywhere **except** privileged locations such as `C:\Program Files` — the app
    writes its own config and logs into its `data/` folder;
 3. Double-click `端口画板.exe`.
@@ -275,8 +275,8 @@ Portable: copy the folder anywhere, uninstall by deleting it.
 ### Option 2 — from source
 
 ```bash
-git clone https://github.com/zccored/Download_To_Draw.git
-cd Download_To_Draw
+git clone https://github.com/zccored/PortPanel.git
+cd PortPanel
 python -m pip install -r requirements.txt
 python port_panel.py
 ```
