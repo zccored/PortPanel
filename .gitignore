@@ -1,0 +1,38 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- 打包产物 ----
+build/
+build_panel/
+dist/
+dist_panel/
+*.spec.bak
+
+# ---- 运行期数据（**绝不入库**）----
+# data/api_config.json 是加密后的用户配置，里面有 API 密钥、Cookie 与会话凭据。
+# 仓库里只放 data/api_config.default.json 这个空壳。
+data/api_config.json
+data/api_config.json.plain.backup
+logs/
+temp/
+temp_images/
+data/manifest/
+data/webAPI/
+handoff/
+data/webtree/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---- 本地私有用例与临时文件 ----
+*.local.*
+~$*

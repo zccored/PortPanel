@@ -1,0 +1,39 @@
+<svg width="440" height="310" viewBox="0 0 440 310" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { fill: #332211; stroke: #cccccc; stroke-width: 2; stroke-dasharray: 6,4; rx: 8; }
+      .input-port { fill: #4caf50; }
+      .output-port { fill: #f44336; }
+      .label { font-family: sans-serif; font-size: 12px; fill: #e0e0e0; }
+      .title { font-size: 14px; font-weight: bold; fill: #e5a53b; }
+      .mono { font-family: monospace; fill: #b5cea8; }
+      .desc-box { fill: #1c140a; }
+      .desc-text { font-family: sans-serif; font-size: 11px; fill: #aab; }
+      .arrow { fill: none; stroke: #888; stroke-width: 1.5; marker-end: url(#arrowhead); }
+      .portkey { font-family: sans-serif; font-size: 10.5px; fill: #dcdcdc; }
+      .portval { font-family: monospace; font-size: 10px; fill: #9fb0c0; }
+      .portnote { font-family: sans-serif; font-size: 10px; fill: #8899aa; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#888" />
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="420" height="290" class="box" />
+  <text x="220" y="38" class="label title" text-anchor="middle">🔢 步进器节点</text>
+  <text x="30" y="65" class="label">步长/公式：</text>
+  <rect x="130" y="52" width="180" height="22" fill="#1a1410" stroke="#555" rx="3" />
+  <text x="140" y="68" class="mono">{{formula}}</text>
+  <text x="30" y="90" class="desc-text">第 {{step}} 轮 · 数值输出见右下端口</text>
+
+  <!-- 端口清单：NodeView._apply_hover_ports 在框被拉开那一刻按真实端口生成（顶部 y=105，页脚原始 y=215） -->
+  <!-- HOVER:PORTS top=105 tail=215 -->
+
+  <g transform="translate(0,{{tail_dy}})">
+    <line x1="20" y1="215" x2="420" y2="215" stroke="#444" stroke-width="1" />
+    <rect x="25" y="225" width="390" height="55" rx="4" class="desc-box" />
+    <text x="40" y="243" class="desc-text" font-weight="bold">📖 解释：</text>
+    <text x="40" y="261" class="desc-text">数字计算引擎：{步数} 每轮自动 +1，支持安全公式求值（含开头运算符/多路输入）。</text>
+    <text x="40" y="277" class="desc-text">常用于生成分页页码、偏移量，把算出的数值注入下游 API 参数驱动翻页。</text>
+  </g>
+</svg>

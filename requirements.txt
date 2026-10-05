@@ -1,0 +1,26 @@
+# 端口画板 · PortPanel — 运行依赖
+# Python 3.12（开发环境 3.12.x）
+# 安装：python -m pip install -r requirements.txt
+
+# ---- GUI ----
+PySide6==6.9.1
+
+# ---- 网络 / 抓取 ----
+requests==2.31.0
+curl_cffi==0.15.0          # 浏览器指纹回退（绕过部分站点的 TLS 指纹风控；可选但强烈建议）
+beautifulsoup4==4.12.2     # 站点解析节点的 HTML 解析
+lxml==6.1.1
+
+# ---- 配置加密 / 校验 ----
+cryptography==44.0.0       # api_config.json 的加密存储
+
+# ---- 表格 ----
+openpyxl==3.1.5            # 数据库框（CSV/Excel）
+
+# ---- 本地同步服务（api_config_dialog 会 import aliyun_client）----
+websockets==15.0.1
+aiohttp==3.9.3
+oss2==2.19.1
+
+# ---- 打包（仅构建发布版时需要）----
+# pyinstaller==6.15.0

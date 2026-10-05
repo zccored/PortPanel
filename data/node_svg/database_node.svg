@@ -1,0 +1,37 @@
+<svg width="460" height="310" viewBox="0 0 460 310" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { fill: #1a3344; stroke: #cccccc; stroke-width: 2; stroke-dasharray: 6,4; rx: 8; }
+      .field-port { fill: #ffb74d; }
+      .label { font-family: sans-serif; font-size: 12px; fill: #e0e0e0; }
+      .title { font-size: 14px; font-weight: bold; fill: #fff; }
+      .mono { font-family: monospace; fill: #9cdcfe; }
+      .desc-box { fill: #0f1e28; }
+      .desc-text { font-family: sans-serif; font-size: 11px; fill: #aab; }
+      .arrow { fill: none; stroke: #ffb74d; stroke-width: 1.5; marker-end: url(#arrowhead); }
+      .portkey { font-family: sans-serif; font-size: 10.5px; fill: #dcdcdc; }
+      .portval { font-family: monospace; font-size: 10px; fill: #9fb0c0; }
+      .portnote { font-family: sans-serif; font-size: 10px; fill: #8899aa; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ffb74d" />
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="440" height="290" class="box" />
+  <text x="230" y="38" class="label title" text-anchor="middle">🗄️ 数据库节点</text>
+  <text x="230" y="58" class="label" text-anchor="middle">{{file}} (共 {{rows}} 行)</text>
+  <text x="30" y="85" class="label">当前行：</text>
+  <text x="100" y="85" class="mono">第 {{row}} 行</text>
+
+  <!-- 端口清单：NodeView._apply_hover_ports 在框被拉开那一刻按真实端口生成（顶部 y=105，页脚原始 y=220） -->
+  <!-- HOVER:PORTS top=105 tail=220 -->
+
+  <g transform="translate(0,{{tail_dy}})">
+    <line x1="20" y1="220" x2="440" y2="220" stroke="#444" stroke-width="1" />
+    <rect x="25" y="230" width="410" height="55" rx="4" class="desc-box" />
+    <text x="40" y="248" class="desc-text" font-weight="bold">📖 解释：</text>
+    <text x="40" y="266" class="desc-text">表格数据源：分块懒加载 CSV/Excel，每轮轮询自动推进下一行作为当前数据。</text>
+    <text x="40" y="282" class="desc-text">每个字段独立输出端口，可拖拽连线注入 API 参数或驱动拼合/规则命名。</text>
+  </g>
+</svg>

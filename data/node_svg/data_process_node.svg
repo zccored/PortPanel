@@ -1,0 +1,43 @@
+<svg width="420" height="290" viewBox="0 0 420 290" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { fill: #222233; stroke: #cccccc; stroke-width: 2; stroke-dasharray: 6,4; rx: 8; }
+      .input-port { fill: #4caf50; }
+      .output-port { fill: #f44336; }
+      .label { font-family: sans-serif; font-size: 12px; fill: #e0e0e0; }
+      .title { font-size: 14px; font-weight: bold; fill: #ffb454; }
+      .mono { font-family: monospace; fill: #ce9178; }
+      .desc-box { fill: #16161f; }
+      .desc-text { font-family: sans-serif; font-size: 11px; fill: #aab; }
+      .arrow { fill: none; stroke: #888; stroke-width: 1.5; marker-end: url(#arrowhead); }
+      .portkey { font-family: sans-serif; font-size: 10.5px; fill: #dcdcdc; }
+      .portval { font-family: monospace; font-size: 10px; fill: #9fb0c0; }
+      .portnote { font-family: sans-serif; font-size: 10px; fill: #8899aa; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#888" />
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="400" height="270" class="box" />
+  <text x="210" y="38" class="label title" text-anchor="middle">⚙️ 数据处理节点</text>
+  <text x="30" y="74" class="label">正则：</text>
+  <rect x="30" y="80" width="140" height="22" fill="#1a1a24" stroke="#555" rx="3" />
+  <text x="40" y="95" class="mono">{{regex}}</text>
+  <text x="190" y="74" class="label">替换为：</text>
+  <rect x="190" y="80" width="140" height="22" fill="#1a1a24" stroke="#555" rx="3" />
+  <text x="200" y="95" class="mono">{{replace}}</text>
+  <text x="350" y="95" class="desc-text">源数据 / 处理后</text>
+  <text x="350" y="108" class="desc-text">见下方端口行</text>
+
+  <!-- 端口清单：NodeView._apply_hover_ports 在框被拉开那一刻按真实端口生成（顶部 y=115，页脚原始 y=200） -->
+  <!-- HOVER:PORTS top=115 tail=200 -->
+
+  <g transform="translate(0,{{tail_dy}})">
+    <line x1="20" y1="200" x2="400" y2="200" stroke="#444" stroke-width="1" />
+    <rect x="25" y="210" width="370" height="55" rx="4" class="desc-box" />
+    <text x="40" y="228" class="desc-text" font-weight="bold">📖 解释：</text>
+    <text x="40" y="246" class="desc-text">文本清洗器：对输入执行正则替换，编辑时实时预览处理结果。</text>
+    <text x="40" y="262" class="desc-text">处理值实时推向下游；常用于提取/格式化字段、命名规则文件夹。</text>
+  </g>
+</svg>

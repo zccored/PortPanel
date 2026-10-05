@@ -1,0 +1,38 @@
+<svg width="440" height="310" viewBox="0 0 440 310" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { fill: #1e2a3a; stroke: #cccccc; stroke-width: 2; stroke-dasharray: 6,4; rx: 8; }
+      .input-port { fill: #4caf50; }
+      .output-port { fill: #f44336; }
+      .label { font-family: sans-serif; font-size: 12px; fill: #e0e0e0; }
+      .title { font-size: 14px; font-weight: bold; fill: #fff; }
+      .mono { font-family: monospace; fill: #cfd8e3; }
+      .entry { font-family: sans-serif; font-size: 11px; fill: #9fc0e8; }
+      .desc-box { fill: #111822; }
+      .desc-text { font-family: sans-serif; font-size: 11px; fill: #aab; }
+      .arrow { fill: none; stroke: #888; stroke-width: 1.5; marker-end: url(#arrowhead); }
+      .portkey { font-family: sans-serif; font-size: 10.5px; fill: #dcdcdc; }
+      .portval { font-family: monospace; font-size: 10px; fill: #9fb0c0; }
+      .portnote { font-family: sans-serif; font-size: 10px; fill: #8899aa; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#888" />
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="420" height="290" class="box" />
+  <text x="220" y="32" class="label title" text-anchor="middle">🌐 API 节点</text>
+  <text x="220" y="45" class="label entry" text-anchor="middle">请求入口来源: {{entry}}</text>
+  <text x="220" y="58" class="label" text-anchor="middle">{{method}} {{url}}</text>
+
+  <!-- 端口清单：NodeView._apply_hover_ports 在框被拉开那一刻按真实端口生成（顶部 y=80，页脚原始 y=220） -->
+  <!-- HOVER:PORTS top=80 tail=220 -->
+
+  <g transform="translate(0,{{tail_dy}})">
+    <line x1="20" y1="220" x2="420" y2="220" stroke="#444" stroke-width="1" />
+    <rect x="25" y="230" width="390" height="60" rx="4" class="desc-box" />
+    <text x="40" y="250" class="desc-text" font-weight="bold">📖 解释：</text>
+    <text x="40" y="268" class="desc-text">核心请求引擎：参数替换 + 数组迭代逐项请求，自动识别 JSON/二进制。</text>
+    <text x="40" y="284" class="desc-text">拼合栏可追加 URL 路径；响应进右侧输出栏，下载内容按哈希去重落盘。</text>
+  </g>
+</svg>
