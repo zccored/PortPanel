@@ -40,3 +40,14 @@ desktop.ini
 # ---- Release 压缩包（走 GitHub Release，不入库）----
 PortPanel-*.zip
 _release_*.zip
+
+# ---- 图纸与用户数据：**一律不分发** ----
+# 图纸(.wbt) 里既有 API 入口（api_ref）又有原样存盘的请求头（真实 Cookie/session）；
+# manifest/ 是下载清单（含本机存储路径与内容标题）；webAPI/ 是抓取到的名录。
+# 下面几条是硬性的：仓库里不会出现任何一张图纸、任何一条入口内容。
+*.wbt
+samples/
+data/webtree/
+data/manifest/
+data/webAPI/
+data/api_config.default.json

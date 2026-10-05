@@ -788,7 +788,7 @@ def cookie_status_text(headers) -> str:
 
 
 def suggest_cookie_env_name(url='') -> str:
-    """按域名猜一个环境变量名，例如 https://example.com/... → EXAMPLE_COOKIE。"""
+    """按域名猜一个环境变量名，例如 https://example.com/... → EXAMPLE_COM_COOKIE。"""
     host = ''
     try:
         host = (urlparse(str(url or '')).hostname or '')

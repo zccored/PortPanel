@@ -181,14 +181,15 @@ Download_To_Draw/
 ├─ aliyun_client.py         # 本地同步服务（api_config_dialog 依赖）
 ├─ port_panel.spec          # PyInstaller 打包配置
 ├─ requirements.txt
-├─ tools/
-│   └─ make_public_samples.py   # 把样板图纸净化成可公开发布的版本
-├─ samples/                 # 随包附带的样板图纸（**已抹掉真实 Cookie**）
 └─ data/
-    ├─ node_svg/            # 悬停提示框的 SVG 模板（9 个）
-    ├─ fonts/
-    └─ api_config.default.json  # 空配置壳（真实配置首次保存时自动生成，已加密）
+    ├─ node_svg/            # 悬停提示框的 SVG 模板（9 个，纯 UI 模板）
+    └─ fonts/               # 渲染用字体
 ```
+
+> **这个仓库里没有图纸、没有 API 入口内容、没有任何凭据。** 这是刻意的：
+> `.wbt` 图纸会原样存下请求头（含真实 Cookie/session），API 入口内容属于使用者自己的数据，
+> 都不应该随代码分发。仓库与发行包里只有**程序本身和纯 UI 资源**。
+> 首次运行时程序会自己生成一份空的加密配置，图纸也要你自己新建 —— 从零开始搭，或导入别人给你的图纸。
 
 ## 自己打包
 
@@ -203,17 +204,34 @@ python -m PyInstaller --noconfirm --clean port_panel.spec
 - **onedir 而不是 onefile**：onefile 每次启动都要解压 ~200MB，首启 10 秒起；onedir 秒开，
   也方便 image-search 按路径找到 exe；
 - **排除用不到的 Qt 模块**（WebEngine / Quick / 3D / Multimedia…），不排的话包会大三四百 MB；
-- **样板图纸走 `samples/`（净化版）**，不会把 `data/webtree/` 里的原始图纸打进去。
+- **打包清单是白名单**：只列 `data/node_svg` 与 `data/fonts` 两个纯资源目录。
+  文件里还有一道**兜底闸门** —— 一旦 `datas` 里出现 `webtree` / `manifest` / `webAPI` /
+  `api_config.json`，构建会**直接报错退出**，而不是把用户数据悄悄打进发布包。
+  （这道闸门是补出来的：第一版用的是"排除已知敏感目录"的黑名单写法，
+  结果 `data/manifest/`、`data/webAPI/` 这两个运行时数据目录被打了进去 ——
+  里面是使用者本机的下载记录和抓取到的名录。教训：**打包清单要用白名单**，
+  因为 `data/` 下面随时会长出新的用户数据目录。）
 
 ## 隐私与安全
 
-- `data/api_config.json` 用 **AES（Fernet）+ 机器绑定密钥**加密落盘；仓库与压缩包里
-  **只放空壳** `data/api_config.default.json`，不含任何真实凭据；
-- 备份文件 `*.plain.backup` 也走密文缓存，明文只在内存里；
-- `.wbt` 图纸文件**会原样保存请求头**（包括 Cookie）—— 分享图纸前请自行清理；
-  仓库里的 `samples/` 已经用 `tools/make_public_samples.py` 把真实 Cookie 换成了
-  `${ENV:...}` 占位符；
+**仓库与发行包里不含任何使用者数据。** 具体来说，下面这些**一律不分发**：
+
+| 类别 | 为什么 |
+|---|---|
+| `.wbt` 图纸 | 里面既有 API 入口（`api_ref`），又有**原样存盘的请求头**（真实 Cookie / session） |
+| API 入口内容 | 站点地址、子端口路径、参数、请求头、Cookie —— 属于使用者自己的配置 |
+| `data/api_config.json` | 真实图源配置（已加密），首次运行时由程序自己生成 |
+| `data/manifest/` | 下载清单 —— 含**本机存储路径、内容标题、文件哈希** |
+| `data/webAPI/` 等抓取结果 | 抓下来的名录/表格等，是使用者的数据 |
+
+程序侧的保护：
+
+- `data/api_config.json` 用 **AES（Fernet）+ 机器绑定密钥**加密落盘，备份文件
+  `*.plain.backup` 也走密文缓存（明文只在内存里）；
 - 程序只在你按下「执行」或「调试」时才会向外发请求，不会后台偷偷联网。
+
+如果你要**分享自己的图纸**给别人：`.wbt` 会把请求头原样带出去，
+请先把里面的 Cookie / Authorization 之类清掉或换成 `${ENV:...}` 占位符再发。
 
 ## 许可证
 
@@ -330,14 +348,26 @@ python -m PyInstaller --noconfirm --clean port_panel.spec
 
 ## Privacy & security
 
-- `data/api_config.json` is encrypted (Fernet, machine-bound key). The repo and the
-  release archive ship only the empty `data/api_config.default.json` — no real
-  credentials anywhere;
-- `.wbt` drawings store request headers **verbatim**, cookies included. Scrub them
-  before sharing. The bundled `samples/` were sanitized by
-  `tools/make_public_samples.py`, which replaces real cookies with `${ENV:...}`
-  placeholders;
+**Neither the repository nor the release archive contains any user data.** The
+following are deliberately **not distributed**:
+
+| Category | Why |
+|---|---|
+| `.wbt` drawings | They embed both the API entry (`api_ref`) and request headers **stored verbatim** (real cookies / session tokens) |
+| API entry content | Site URLs, endpoint paths, parameters, headers, cookies — that is your own configuration |
+| `data/api_config.json` | The real (encrypted) source config; the app generates it on first run |
+| `data/manifest/` | Download manifest — contains **local storage paths, content titles and file hashes** |
+| `data/webAPI/` and similar scrape output | Data you harvested, i.e. yours |
+
+Protections built into the app:
+
+- `data/api_config.json` is encrypted (Fernet with a machine-bound key), and its
+  `*.plain.backup` also goes through the ciphertext cache — plaintext stays in memory only;
 - The app only talks to the network when you press *Run* or *Debug*.
+
+Sharing **your own** drawing with someone else? `.wbt` carries request headers
+verbatim — strip cookies / Authorization first, or replace them with `${ENV:...}`
+placeholders.
 
 ## License
 

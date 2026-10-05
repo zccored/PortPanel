@@ -21,25 +21,37 @@ import os
 
 ROOT = os.path.dirname(os.path.abspath(SPEC))
 
+# ---- 只打**纯资源**：SVG 模板 + 字体 ----
+#
+# ⚠ 明确**不打包任何用户数据**。「图纸 / API 入口内容 / 敏感信息一律不分发」是硬要求：
+#
+#   · data/webtree/*.wbt     图纸。里面既有 API 入口（api_ref）又有原样存盘的请求头
+#                            （真实 Cookie / session），是最敏感的一类；
+#   · data/api_config.json   真实图源配置（加密），本来就不能带；
+#   · data/manifest/         下载清单 —— 含**用户本机的存储路径、内容标题、文件哈希**；
+#   · data/webAPI/           抓取到的名录等（本项目里那份是 8 万多行创作者表）；
+#   · data/fonts/…           字体是程序渲染要用的资源，属于"纯资源"，保留。
+#
+# 曾经踩过的坑：这里原来有一个 `for _extra in ('webAPI', 'manifest')` 的循环，
+# 于是**第一次发布的压缩包里真的带上了用户的下载记录与 4.1 MB 创作者名录**。
+# 教训：打包清单要**白名单**（只列必须的），不要**黑名单**（排除已知敏感的）——
+# 因为 data/ 下面随时会长出新的用户数据目录。下面的写法就是白名单。
 datas = []
 for _sub in ('node_svg', 'fonts'):
     _p = os.path.join(ROOT, 'data', _sub)
     if os.path.isdir(_p):
         datas.append((_p, os.path.join('data', _sub)))
-# 样板图纸用**净化过的**副本（samples/），不要直接打 data/webtree ——
-# 原始 .wbt 里带着真实 Cookie/session（请求头是原样存盘的），不能随包分发。
-# 净化规则见 tools/make_public_samples.py。
-_pub = os.path.join(ROOT, 'samples')
-if os.path.isdir(_pub):
-    datas.append((_pub, os.path.join('data', 'webtree')))
-# 配置文件不打包真实内容（里面有用户的密钥/Cookie）；只放一份默认空壳，
-# 首次保存时程序会自己写成加密文件。
-datas.append((os.path.join(ROOT, 'data', 'api_config.default.json'), 'data'))
-# 悬停提示框要读的示例/资源目录（存在才带）
-for _extra in ('webAPI', 'manifest'):
-    _p = os.path.join(ROOT, 'data', _extra)
-    if os.path.isdir(_p):
-        datas.append((_p, os.path.join('data', _extra)))
+
+# 兜底闸门：万一以后有人往上面的白名单里加了用户数据目录，这里直接把构建**挡下来**，
+# 而不是等它悄悄进了发布包才发现。
+_FORBIDDEN = ('webtree', 'manifest', 'webapi', 'api_config.json')
+_bad = [d for d in datas
+        if any(f in os.path.basename(str(d[0])).lower() for f in _FORBIDDEN)]
+if _bad:
+    raise SystemExit(
+        "\n❌ 打包被拒绝：datas 里出现了用户数据目录 %r\n"
+        "   图纸 / API 入口内容 / 敏感信息一律不分发，请把它们从 datas 里拿掉。\n"
+        % ([str(d[0]) for d in _bad],))
 
 hiddenimports = [
     # Qt 侧：SVG 渲染是悬停提示框的命脉，PyInstaller 不会自动追
