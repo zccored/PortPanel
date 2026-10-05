@@ -30,7 +30,7 @@
 ### 方式一：用打包版（普通用户推荐）
 
 1. 到 [Releases](https://github.com/zccored/Download_To_Draw/releases) 下载
-   `端口画板-vX.Y.Z-win64.zip`；
+   `PortPanel-vX.Y.Z-win64.zip`；
 2. 解压到任意目录（**别放在 `C:\Program Files` 之类需要管理员权限的地方** ——
    程序要往自己的 `data/` 里写配置与日志）；
 3. 双击 `端口画板.exe`。
@@ -246,7 +246,7 @@ drawing *is* one download pipeline.
 
 ### Option 1 — packaged build (recommended for end users)
 
-1. Grab `端口画板-vX.Y.Z-win64.zip` from
+1. Grab `PortPanel-vX.Y.Z-win64.zip` from
    [Releases](https://github.com/zccored/Download_To_Draw/releases);
 2. Unzip anywhere **except** privileged locations such as `C:\Program Files` — the app
    writes its own config and logs into its `data/` folder;

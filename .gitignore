@@ -36,3 +36,7 @@ desktop.ini
 # ---- 本地私有用例与临时文件 ----
 *.local.*
 ~$*
+
+# ---- Release 压缩包（走 GitHub Release，不入库）----
+PortPanel-*.zip
+_release_*.zip
