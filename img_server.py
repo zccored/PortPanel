@@ -9299,9 +9299,45 @@ class CollapseTriangle(QToolButton):
                 self._pane.setMaximumHeight(self._header_extent() if on else 16777215)
         self.setText(self._sym_col if on else self._sym_exp)
         self.setToolTip('放回面板' if on else '收起面板')
-        if (not on) and sp is not None and self._saved_sizes:
-            _sz = self._saved_sizes
-            QTimer.singleShot(0, lambda s=sp, z=_sz: self._restore_sizes(s, z))
+        if sp is not None:
+            if on:
+                # 收起：**显式**把让出来的空间补给另一边。
+                # 不能指望 QSplitter 自己算 —— 它按各 child 的 sizeHint 与拉伸因子分配，
+                # 一旦给画板设了拉伸因子（为了让它吃满窗口），被收起那侧让出来的宽度
+                # 就**不会**自动补过去（实测：收起左侧栏后画板宽度纹丝不动）。
+                QTimer.singleShot(0, lambda s=sp: self._rebalance(s))
+            elif self._saved_sizes:
+                _sz = self._saved_sizes
+                QTimer.singleShot(0, lambda s=sp, z=_sz: self._restore_sizes(s, z))
+
+    @staticmethod
+    def _rebalance(sp):
+        """把"被收起那一侧"压到细边，其余空间全给另一侧。
+
+        只处理两个 child 的分割器（本处全部如此）；横向按宽度、竖向按高度。
+        """
+        try:
+            if sp.count() != 2:
+                return
+            horiz = (sp.orientation() == Qt.Horizontal)
+            cur = sp.sizes()
+            total = sum(cur) or 1
+            out = list(cur)
+            collapsed = []
+            for i in (0, 1):
+                w = sp.widget(i)
+                if w is None:
+                    continue
+                cap = w.maximumWidth() if horiz else w.maximumHeight()
+                if cap < 100000:                 # 这一侧被收起了
+                    out[i] = max(1, int(cap))
+                    collapsed.append(i)
+            rest = [i for i in (0, 1) if i not in collapsed]
+            if rest:
+                out[rest[0]] = max(1, total - sum(out[i] for i in collapsed))
+            sp.setSizes(out)
+        except Exception:
+            pass
 
     @staticmethod
     def _restore_sizes(sp, sizes):
@@ -10243,7 +10279,15 @@ class FlowEditorDialog(QDialog):
         self._content_stack = QStackedWidget()
         splitter.addWidget(self._content_stack)
 
-        splitter.setSizes([200, 700])
+        splitter.setSizes([300, 1200])
+        # ---- 默认给画板让出更多宽度 ----
+        # setSizes 只管初始宽度，**拉伸因子**才是关键：
+        #   · 侧栏设 0 → 窗口拉大时保持自己的宽度不变；
+        #   · 画板设 1 → 多出来的宽度**全部**归它。
+        # 不设的话 Qt 按比例把新增宽度摊给两边，侧栏跟着一起变胖，
+        # 画板反而占不到便宜（实测：1500 窗口下侧栏被摊到 423px，画板只剩 683px）。
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         main.addWidget(splitter)
 
         # ---- 底部状态栏（左下角：状态 + 进度条 + 取消按钮）----
@@ -15910,7 +15954,11 @@ class FlowEditorDialog(QDialog):
         content = QSplitter(Qt.Horizontal)
         content.addWidget(mid)
         content.addWidget(right_wrap)
-        content.setSizes([600, 320])
+        # 右侧栏默认收窄 + 拉伸因子归 0：窗口变宽时它保持原宽，多出来的全给画板。
+        # （原来 setSizes 给了 320，但按比例摊下来实测到 364px，画板被挤到不到一半。）
+        content.setSizes([900, 268])
+        content.setStretchFactor(0, 1)
+        content.setStretchFactor(1, 0)
         content.setChildrenCollapsible(False)
         tab['widget'] = content
         tab['mid_widget'] = mid

@@ -2440,6 +2440,15 @@ class APIConfigDialog(QDialog):
         toolbar.addWidget(self.delete_source_btn)
 
         toolbar.addStretch()
+
+        # ---- 新手引导：遮罩 + 聚光灯 + 交互式推进（与端口画板同一套引擎）----
+        self.tour_btn = QPushButton("🎓 新手引导")
+        self.tour_btn.setToolTip(
+            "带高亮遮罩的交互式引导：该点的地方直接点，做完会自动继续。\n"
+            "随时可按 Esc 退出；以后想重看就点这里。")
+        self.tour_btn.clicked.connect(self._start_tour)
+        toolbar.addWidget(self.tour_btn)
+
         layout.addLayout(toolbar)
 
         # 说明文字
@@ -2667,6 +2676,64 @@ class APIConfigDialog(QDialog):
         except Exception:
             pass
 
+    # ---------------- 新手引导（图源配置版，与端口画板同一套引擎） ----------------
+    def _maybe_auto_tour(self, _tries=0):
+        """首次打开「图源配置」时自动弹一次引导。
+
+        · 只在"确实没看过"时弹（标记同样落在 `data/ui_state.json`，键是 image_source_v1）。
+        · 窗口还没显示出来就等一会儿再试 —— 引导要高亮真实控件，没显示时量不到几何。
+        · `PORT_PANEL_NO_TOUR=1` 可关掉自动弹（自动化/回归脚本要设）。
+        """
+        if os.environ.get('PORT_PANEL_NO_TOUR') == '1':
+            return
+        try:
+            from tour_layer import tour_seen
+            from tour_script_image_source import TOUR_KEY
+        except Exception:
+            return
+        if tour_seen(TOUR_KEY):
+            return
+        try:
+            if not self.isVisible():
+                if _tries < 12:
+                    QTimer.singleShot(400, lambda: self._maybe_auto_tour(_tries + 1))
+                return
+        except RuntimeError:
+            return
+        self._start_tour()
+
+    def _start_tour(self):
+        """开一次「图源配置」新手引导。首次打开自动调，之后点 🎓 新手引导 重看。"""
+        cur = getattr(self, '_tour', None)
+        if cur is not None:
+            try:
+                if cur.active:
+                    return                     # 已经在跑了，别叠两层遮罩
+            except RuntimeError:
+                self._tour = None
+        try:
+            from tour_layer import GuidedTour
+            from tour_script_image_source import TOUR_KEY, image_source_tour_steps
+        except Exception as e:                                  # noqa: BLE001
+            QMessageBox.warning(self, '新手引导', f'引导模块不可用：{e}')
+            return
+        try:
+            self._tour = GuidedTour(image_source_tour_steps(self), self)
+            self._tour.finished.connect(
+                lambda done: self._on_tour_finished(TOUR_KEY, done))
+            self._tour.start()
+        except Exception as e:                                  # noqa: BLE001
+            self._tour = None
+            QMessageBox.critical(self, '新手引导', f'引导启动失败：{e}')
+
+    def _on_tour_finished(self, key, completed):
+        """引导收工：走完或跳过都记成"看过"，下次不再自动弹。"""
+        try:
+            from tour_layer import mark_tour_seen
+            mark_tour_seen(key, True)
+        except Exception:
+            pass
+
     def _refresh_image_source_tabs(self):
         """刷新图源配置内部的子选项卡"""
         # 断开信号避免触发
@@ -2716,6 +2783,9 @@ class APIConfigDialog(QDialog):
         """)
         add_ep_btn.clicked.connect(lambda checked, si=src_idx: self.add_endpoint(si))
         info_bar.addWidget(add_ep_btn)
+        # 挂到 self 上：新手引导要高亮它（`_ep_*` 那套按"当前入口页"存的写法，
+        # 这里跟着走 —— 每个入口页重建时会被覆盖成该页的那个按钮）
+        self._ep_add_btn = add_ep_btn
         layout.addLayout(info_bar)
 
         # 使用分割器：上部分子端口列表，下部分详情
@@ -4640,6 +4710,9 @@ class ImageSourceConfigDialog(APIConfigDialog):
             pass
         self.setWindowTitle("图源配置")
         self.setMinimumSize(920, 660)
+        # 首次打开自动弹一次新手引导（看过就不再打扰；延后一点等窗口真的显示出来）
+        self._tour = None
+        QTimer.singleShot(900, self._maybe_auto_tour)
 
     # ---------- 重写 1/3：只建图源这一页 ----------
     def setup_ui(self):
