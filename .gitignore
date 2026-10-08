@@ -51,3 +51,7 @@ data/webtree/
 data/manifest/
 data/webAPI/
 data/api_config.default.json
+
+# 新手引导的「看过」标记（用户本机状态，不入库也不随包）
+data/ui_state.json
+data/ui_state.json.tmp

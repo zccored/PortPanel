@@ -9765,6 +9765,9 @@ class FlowEditorDialog(QDialog):
         self._populate_api_list()
         self._refresh_flow_list()
         self.undo_mgr.save()
+        # 首次运行自动弹一次新手引导（看过就不再打扰；延后一点等窗口真的显示出来）
+        self._tour = None
+        QTimer.singleShot(900, self._maybe_auto_tour)
 
     @staticmethod
     def _load_config():
@@ -9798,6 +9801,75 @@ class FlowEditorDialog(QDialog):
         try:
             self._poll_group.setVisible(bool(on))
             self.btn_poll_fold.setText(('▾ ' if on else '▸ ') + '轮询参数')
+        except Exception:
+            pass
+
+    # ---------------- 新手引导（遮罩 + 聚光灯 + 交互式推进） ----------------
+    def _maybe_auto_tour(self, _tries=0):
+        """首次运行自动弹一次新手引导。
+
+        · 只在"确实没看过"时弹（标记落在 `data/ui_state.json`）。
+        · 窗口还没显示出来就等一会儿再试 —— 引导要高亮真实控件，窗口没显示时
+          量不到几何。
+        · `PORT_PANEL_NO_TOUR=1` 可直接关掉**自动弹**：**自动化/回归脚本必须设它** ——
+          引导会盖一层遮罩、还会在全局吞掉 Esc（它自己要用 Esc 退出），
+          跑测试时弹出来只会干扰被测代码。
+          从菜单手动开引导不受这个开关影响。
+        """
+        if os.environ.get('PORT_PANEL_NO_TOUR') == '1':
+            return
+        try:
+            from tour_layer import tour_seen
+            from tour_script_panel import TOUR_KEY
+        except Exception:
+            return
+        if tour_seen(TOUR_KEY):
+            return
+        try:
+            if not self.isVisible():
+                if _tries < 12:
+                    QTimer.singleShot(400, lambda: self._maybe_auto_tour(_tries + 1))
+                return
+        except RuntimeError:
+            return
+        self._start_tour()
+
+    def _start_tour(self):
+        """开一次新手引导。首次运行自动调，之后从「🛠️ 工具栏 → 🎓 新手引导」重看。"""
+        cur = getattr(self, '_tour', None)
+        if cur is not None:
+            try:
+                if cur.active:
+                    return                     # 已经在跑了，别叠两层遮罩
+            except RuntimeError:
+                self._tour = None              # C++ 对象已被销毁
+        if getattr(self, '_running', False):
+            QMessageBox.information(self, '新手引导', '流程正在执行中，先停下再开引导吧。')
+            return
+        try:
+            from tour_layer import GuidedTour
+            from tour_script_panel import TOUR_KEY, panel_tour_steps
+        except Exception as e:                                  # noqa: BLE001
+            QMessageBox.warning(self, '新手引导', f'引导模块不可用：{e}')
+            return
+        try:
+            self._tour = GuidedTour(panel_tour_steps(self), self)
+            self._tour.finished.connect(
+                lambda done: self._on_tour_finished(TOUR_KEY, done))
+            self._tour.start()
+        except Exception as e:                                  # noqa: BLE001
+            self._tour = None
+            QMessageBox.critical(self, '新手引导', f'引导启动失败：{e}')
+
+    def _on_tour_finished(self, key, completed):
+        """引导收工：不管走完还是中途跳过，都记成"看过"，下次不再自动弹。
+
+        （这里**不**把 self._tour 置空 —— finished 是在 GuidedTour.close() 内部发出的，
+        那时它自己还在跑收尾代码；提前丢掉最后一个 Python 引用会让它在半路被回收。）
+        """
+        try:
+            from tour_layer import mark_tour_seen
+            mark_tour_seen(key, True)
         except Exception:
             pass
 
@@ -9979,6 +10051,10 @@ class FlowEditorDialog(QDialog):
         act_step.triggered.connect(self._on_add_stepper_clicked)
         act_site = self._tools_menu.addAction("🌐 添加站点解析")
         act_site.triggered.connect(self._on_add_site_parser_clicked)
+        self._tools_menu.addSeparator()
+        act_tour = self._tools_menu.addAction("🎓 新手引导")
+        act_tour.setToolTip("带高亮遮罩的交互式引导：该点的地方直接点，做完自动继续")
+        act_tour.triggered.connect(self._start_tour)
         self.btn_tools.setMenu(self._tools_menu)
         tb.addWidget(self.btn_tools)
 
