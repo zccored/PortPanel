@@ -237,12 +237,30 @@ class _Bubble(QFrame):
         self._width = BUBBLE_W
 
     def set_content(self, step: TourStep, index: int, total: int,
-                    waiting: bool, last: bool) -> None:
+                    waiting: bool, last: bool, already: bool = False) -> None:
+        """填内容。
+
+        `waiting` 与 `already` **互斥**，表达三种状态：
+
+        * ``already=True`` —— 这步的事**用户已经做过了**（典型是点「上一步」退回来）。
+          此时**不轮询**，主按钮是「下一步」，提示换成绿色的「已完成」。
+        * ``waiting=True`` —— 正在等他动手：显示 ⏳ 提示，主按钮是「跳过这步」。
+        * 两者都 False —— 纯讲解：主按钮「下一步 / 完成」。
+        """
         self.lb_title.setText(step.title)
         self.lb_body.setText(step.body or '')
         self.lb_body.setVisible(bool(step.body))
-        self.lb_hint.setText(('⏳ ' + step.hint) if waiting else '')
-        self.lb_hint.setVisible(waiting)
+        if already:
+            self.lb_hint.setText('✅ 这步已经完成了')
+            self.lb_hint.setStyleSheet(f'color: {C_OK};')
+            self.lb_hint.setVisible(True)
+        elif waiting:
+            self.lb_hint.setText('⏳ ' + step.hint)
+            self.lb_hint.setStyleSheet(f'color: {C_WAIT};')
+            self.lb_hint.setVisible(True)
+        else:
+            self.lb_hint.setText('')
+            self.lb_hint.setVisible(False)
         self.lb_counter.setText(f'第 {index} / {total} 步')
         self.btn_back.setVisible(index > 1)
         self.btn_back.setEnabled(index > 1)
@@ -415,6 +433,21 @@ class GuidedTour(QObject):
             return index
         return None
 
+    def _done_now(self, step: TourStep) -> bool:
+        """这一步的交互判据**当前**是否已经满足。
+
+        为什么要在"进入步骤时"就问一次：进入时如果它**已经为真**，说明用户之前就做完了
+        这件事（典型场景：做完 → 自动进下一步 → 用户点「上一步」退回来）。
+        这时若照常启动轮询，250ms 后就会判定为真、把用户又弹回下一步 ——
+        「上一步」看起来就像失灵了一样。
+        """
+        if step.done is None:
+            return False
+        try:
+            return bool(step.done())
+        except Exception:
+            return False
+
     def _show_step(self, index: int) -> None:
         if not self._active or self._win is None:
             return
@@ -451,9 +484,13 @@ class GuidedTour(QObject):
 
         visible = [i for i, s in enumerate(self._steps)
                    if not (s.optional and not self._available(s))]
-        waiting = step.done is not None
+        # 先问一次判据：为真说明这步用户早做过了（多半是点「上一步」退回来的），
+        # 那就按"讲解"呈现、**不启动轮询**，否则会立刻被弹回下一步。
+        already = self._done_now(step)
+        waiting = (step.done is not None) and not already
         self._bubble.set_content(step, visible.index(index) + 1, len(visible),
-                                 waiting, last=(index == visible[-1]))
+                                 waiting, last=(index == visible[-1]),
+                                 already=already)
         self._bubble.place(hole, step.anchor, self._win.rect())
         self._bubble.show()
         self._bubble.raise_()
