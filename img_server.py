@@ -16090,12 +16090,32 @@ class FlowEditorDialog(QDialog):
         self._new_tab(name=name, filepath=filepath, load_file=True)
 
     def _on_new_drawing_clicked(self):
-        """新建图纸：创建新选项卡并立即保存占位到流程图栏。"""
+        """新建图纸：先问名字，确认后创建选项卡并立即保存占位到流程图栏。
+
+        命名框**预填**了 `新图纸_月日_时分秒` —— 不想取名的直接回车就走，
+        和以前"一键新建"一样快；想取名的改一下即可。
+        点「取消」则**什么都不做**（免得留下一个用户没打算要的空图纸）。
+        """
         if self._running:
             QMessageBox.information(self, "提示", "流程执行中，请先停止。")
             return
-        name = f"新图纸_{time.strftime('%m%d_%H%M%S')}"
+        default = f"新图纸_{time.strftime('%m%d_%H%M%S')}"
+        name, ok = QInputDialog.getText(
+            self, "新建图纸", "给这张图纸起个名字：", text=default)
+        if not ok:
+            return
+        name = (name or '').strip() or default
+        # 与「另存为」用同一套清洗规则，避免写出带路径分隔符的文件名
+        name = name.replace('.', '_').replace('/', '_').replace('\\', '_')
         filepath = os.path.join(self._get_webtree_dir(), f"{name}.wbt")
+        if os.path.exists(filepath):
+            # 默认按钮给 No：同名覆盖是破坏性的，不该一不小心就按下去
+            reply = QMessageBox.question(
+                self, "重名确认",
+                f"{name}.wbt 已存在。\n继续会以这张新图纸覆盖它，确定吗？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
         self._new_tab(name=name, filepath=filepath)
         self._save_flow_to(filepath, show_success=False)
         self._refresh_flow_list()

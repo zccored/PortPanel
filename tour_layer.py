@@ -390,6 +390,13 @@ class GuidedTour(QObject):
         et = event.type()
         if et == QEvent.Type.KeyPress:
             if isinstance(event, QKeyEvent) and event.key() == Qt.Key.Key_Escape:
+                # 有模态框/弹出菜单开着时**不要**吃掉 Esc ——
+                # 引导是 app 级 eventFilter，看得到所有键盘事件；那一下 Esc 的本意是
+                # 「取消那个模态框」（比如「新建图纸」的命名框、工具栏的下拉菜单），
+                # 不该顺手把整个引导也关掉。
+                if (QApplication.activeModalWidget() is not None
+                        or QApplication.activePopupWidget() is not None):
+                    return False
                 self.close(completed=False)
                 return True
         elif et in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show) \
