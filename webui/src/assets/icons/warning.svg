@@ -1,0 +1,6 @@
+<!-- 由 design/tools/gen_icons.py 从 design/icons.json 生成 —— 不要手工改 -->
+<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+     width="1em" height="1em" fill="none" stroke="currentColor" stroke-width="1.6"
+     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  <path d="M12 3l9 16H3z"/><path d="M12 9v5"/><circle cx="12" cy="17.5" r="0.8"/>
+</svg>

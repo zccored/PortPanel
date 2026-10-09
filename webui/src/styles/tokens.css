@@ -1,0 +1,51 @@
+/* 本文件由 design/tools/gen_tokens.py 生成 —— 不要手工改。
+   改 token 请改 design/tokens.json，然后重跑生成器。 */
+:root {
+  color-scheme: dark;
+
+  /* color */
+  --bg-0: #16181d;
+  --bg-1: #1c1f26;
+  --bg-2: #22262f;
+  --bg-3: #2a2f3a;
+  --fg-0: #e8ecf3;
+  --fg-1: #aab4c4;
+  --fg-2: #7c8798;
+  --line: #333a47;
+  --line-soft: #262c36;
+  --accent: #4c8dff;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(76, 141, 255, 0.16);
+  --ok: #3ecf8e;
+  --warn: #e8b53c;
+  --danger: #ef5f5f;
+
+  /* space */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* radius */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 10px;
+
+  /* fontSize */
+  --fs-1: 11px;
+  --fs-2: 12px;
+  --fs-3: 13px;
+  --fs-4: 15px;
+  --fs-5: 18px;
+
+  /* shadow */
+  --sh-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sh-2: 0 6px 20px rgba(0, 0, 0, 0.45);
+
+  /* font */
+  --font-ui: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: Consolas, 'Courier New', monospace;
+
+}

@@ -1,0 +1,93 @@
+/* 基础样式与通用控件类（手写）。
+   ⚠️ 颜色/间距/圆角/字号/阴影**一律用 var(--*) 引用 token**，不要在这里写死值。
+   token 定义见 tokens.css（由 design/tools/gen_tokens.py 从 design/tokens.json 生成）。 */
+
+* { box-sizing: border-box; }
+
+html, body, #app { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg-0);
+  color: var(--fg-0);
+  font: var(--fs-3) / 1.5 var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ---------- 通用控件 ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-3);
+  color: var(--fg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  font-size: var(--fs-3);
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.btn:hover { background: var(--bg-3); filter: brightness(1.12); }
+.btn:active { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn--primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn--primary:hover { filter: brightness(1.08); }
+.btn--danger { color: var(--danger); }
+.btn--ghost { background: transparent; }
+.btn--ghost:hover { background: var(--accent-soft); }
+
+.input {
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-1);
+  color: var(--fg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  font-size: var(--fs-3);
+  min-width: 0;
+}
+.input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input--mono { font-family: var(--font-mono); font-size: var(--fs-2); }
+
+.panel {
+  background: var(--bg-1);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-3);
+  box-shadow: var(--sh-1);
+}
+
+.muted { color: var(--fg-2); }
+
+.tag {
+  padding: 1px var(--sp-2);
+  border-radius: 999px;
+  font-size: var(--fs-1);
+  border: 1px solid var(--line);
+  color: var(--fg-1);
+}
+.tag--accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
+.tag--warn { color: var(--warn); border-color: var(--warn); }
+.tag--ok { color: var(--ok); border-color: var(--ok); }
+
+/* 图标（SVG sprite / 内联）统一尺寸与配色，别再用 emoji 当图标 */
+.icon {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 滚动条（统一外观，别露系统默认） */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--line-soft); background-clip: content-box; }
