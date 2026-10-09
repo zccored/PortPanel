@@ -7534,6 +7534,14 @@ _HOVER_PORT_ROW_H = 22       # 单行端口高度
 _HOVER_PORT_HEAD_H = 15      # 「◀ 输入端口 / 输出端口 ▶」小标题占的高度
 _HOVER_PORT_MAX_ROWS = 7     # 一屏最多列几行，超出折叠成「另有 N 个端口」
 
+# 悬停多久才把详情框拉开展示（秒）。
+# 为什么是 0.25 而不是原来的 4.0：4 s 的唯一目的是「别在扫鼠标时乱弹」——
+# 当时浮窗会截获鼠标事件、展开后又锁住位置，只能靠长等待来降低撞上的概率。
+# 现在浮窗点击穿透 + 离开即收（见 NodeHoverTip / NodeView._poll_hover），
+# 长等待失去意义。改动前的实测（docs/_local/tools/measure_hover_tip.py）：
+# 「悬停 → 内容可见」要 4.44 s，其中真·渲染只有 5–31 ms（99.4% 是等待与动效）。
+HOVER_REVEAL_DELAY_S = 0.25
+
 # 模板里用 <!-- HOVER:PORTS top=起点y tail=页脚原始y --> 标出端口区位置
 _HOVER_PORTS_RE = re.compile(
     r'<!--\s*HOVER:PORTS\s+top=(\d+)\s+tail=(\d+)(?:\s+row=(\d+))?\s*-->')
@@ -7572,19 +7580,36 @@ def _hover_grow_canvas(svg, dy):
 
 
 class NodeHoverTip(QWidget):
-    """元素框悬停提示浮窗。
+    """元素框悬停详情浮窗。
 
-    时间线：悬停 0~4s 显示 thinking 文本框（₍^. .^₎⟆thinking....）并平滑跟随鼠标
-    （不同元素框间快速切换时平滑滑过），4s 起拉开展示框动效并正式展示 SVG 内容；
-    展示后锁定位置不再跟随鼠标，可按住拖动到任意位置停留。鼠标离开触发节点后，
-    只要仍在本框外扩的不可视碰撞区内就保持不关闭，移出碰撞区才退出；Esc 始终可退出。
+    时间线：悬停后显示 thinking 文本框（₍^. .^₎⟆thinking....）并平滑跟随鼠标，
+    满 HOVER_REVEAL_DELAY_S 秒拉开展示框动效并展示 SVG（端口清单 + 当前值）；
+    **展开后仍跟随鼠标**；鼠标离开元素框立即收（Esc 也可退出）。
+
+    两条**改动前必读**的约束：
+
+    - **点击穿透**：本窗口带 `Qt.WindowTransparentForInput` ＋ `WA_TransparentForMouseEvents`，
+      落在它上面的点击 / 拖动会穿透到画布。所以这里**不处理鼠标事件** —— 早期版本
+      「把挡路的浮窗拖走」的能力是**故意去掉的**（穿透之后这个需求本身就不存在了）。
+      要改回可交互，得先想清楚它会重新挡住操作，并配合「按键门控」之类的方案
+      （缓冲带也要一起加回来，见 `.agents/memory/knowledge/pitfalls.md` G 节）。
+    - **两个动效不要同时跑**：`_anim` 动的是 geometry（含位置），`_move_anim` 动的是 pos ——
+      同时进行会互相覆盖、抖动。所以 `animate_move_to()` 在展开动效未结束时直接返回。
     """
-    _GRAB = 26  # 边框外不可视碰撞区（像素）：鼠标停留在此带内不关闭
 
     def __init__(self):
         super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setMouseTracking(True)
+        # 点击穿透：鼠标事件落到下层画布，浮窗不再抢点击 / 拖动（见类注释第 1 条）
+        # 两层都要设，缺一不可：
+        #   · Qt.WindowTransparentForInput → 平台层（Windows 上给窗口加 WS_EX_TRANSPARENT），
+        #     真实点击/拖动会穿到下层窗口 —— 这才是「点得到下面的框」的关键；
+        #   · WA_TransparentForMouseEvents → Qt 自己的命中测试也算它透明。
+        #     ⚠️ 实测：只设前者时 QApplication.topLevelAt() 仍会**返回本浮窗**（Qt 枚举
+        #     自己的顶层窗口、只认这个属性），靠 topLevelAt 判「鼠标在哪个窗口上」的代码
+        #     会把画布误判成「被浮窗挡住」；设上它两者才一致。
+        self.setWindowFlag(Qt.WindowTransparentForInput, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self._label = QLabel()
@@ -7595,34 +7620,25 @@ class NodeHoverTip(QWidget):
             "border:1px solid #3a6ea5; border-radius:8px; padding:6px 10px; "
             "font-family: Consolas, 'Courier New', monospace; font-size:13px; }")
         self._pixmap = None
-        self._is_expanded = False   # 是否已进入展示锁定（不再跟随、可拖动）
-        self._dragging = False
-        self._drag_offset = QPoint()
-        self._anim = QPropertyAnimation(self, b"geometry", self)  # 展开动效
+        self._has_svg = False   # 是否已展示 SVG（此时 label 不再用 thinking 文本）
+        self._expanding = False  # 展开动效进行中（期间不跟随，见类注释第 2 条）
+        self._anim = QPropertyAnimation(self, b"geometry", self)  # 展开动效（尺寸）
         self._anim.setDuration(420)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.finished.connect(self._on_expand_done)
-        self._move_anim = QPropertyAnimation(self, b"pos", self)  # thinking 平滑跟随
+        self._move_anim = QPropertyAnimation(self, b"pos", self)  # 平滑跟随（位置）
         self._move_anim.setDuration(180)
         self._move_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.hide()
 
-    # ---------- 平滑跟随 / 拖动 / 不可视碰撞区 ----------
-    def contains_global(self, gp):
-        """屏幕坐标 gp 是否落在本浮窗内（含外扩的不可视碰撞区）。
-
-        这是「鼠标移进 SVG 框 / 在边框外的 26px 缓冲带里停留不关闭」的**唯一判据**：
-        它只看几何关系，不依赖平台窗口枚举（QApplication.topLevelAt 在部分平台上
-        会返回浮窗的子控件或 null，靠它判断会误判成「鼠标已离开」而立刻关闭）。
-        """
-        try:
-            return self.isVisible() and self.collision_rect().contains(gp)
-        except Exception:
-            return False
-
+    # ---------- 平滑跟随 ----------
     def animate_move_to(self, x, y):
-        """把 thinking 框平滑移到屏幕 (x, y)（跟随鼠标锚点；已在目标附近则不动）。"""
-        if self._is_expanded:
+        """把浮窗平滑移到屏幕 (x, y)（跟随鼠标锚点；已在目标附近则不动）。
+
+        展开动效（_anim 动的是 geometry，含位置）未结束时直接返回 —— 与这里的 pos
+        动画同时进行会互相覆盖、抖动。等它结束（`_on_expand_done` 清 `_expanding`）恢复跟随。
+        """
+        if self._expanding:
             return
         cur = self.pos()
         if abs(cur.x() - x) < 2 and abs(cur.y() - y) < 2:
@@ -7632,35 +7648,9 @@ class NodeHoverTip(QWidget):
         self._move_anim.setEndValue(QPoint(int(x), int(y)))
         self._move_anim.start()
 
-    def collision_rect(self):
-        """不可视碰撞区：展示框边界外扩 _GRAB 像素（屏幕坐标）。"""
-        return self.geometry().adjusted(-self._GRAB, -self._GRAB,
-                                        self._GRAB, self._GRAB)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._is_expanded:
-            self._dragging = True
-            self._drag_offset = event.globalPos() - self.frameGeometry().topLeft()
-            self._anim.stop()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._dragging:
-            self.move(event.globalPos() - self._drag_offset)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if self._dragging:
-            self._dragging = False
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
     def _on_expand_done(self):
+        """展开动效结束：把 SVG 塞进 label，并恢复跟随（清 `_expanding`）。"""
+        self._expanding = False
         if getattr(self, '_pixmap', None) is not None and not self._pixmap.isNull():
             self._label.setPixmap(self._pixmap)
             self._label.setAlignment(Qt.AlignCenter)
@@ -7669,8 +7659,8 @@ class NodeHoverTip(QWidget):
         """第一阶段：显示 thinking 文本框（之后平滑跟随鼠标）。"""
         self._anim.stop()
         self._move_anim.stop()
-        self._is_expanded = False
-        self._dragging = False
+        self._expanding = False
+        self._has_svg = False
         self._label.setPixmap(QPixmap())   # 先清空 pixmap，再设文本（二者互斥，后设者生效）
         self._label.setText("₍^. .^₎⟆thinking....")
         self._label.setAlignment(Qt.AlignCenter)
@@ -7683,11 +7673,11 @@ class NodeHoverTip(QWidget):
         self.raise_()
 
     def expand_to(self, x, y, w, h, pixmap):
-        """第三阶段：CSS 拉开展示框动效 + 正式渲染 SVG；随后锁定不再跟随。"""
+        """第三阶段：拉开展示框动效并渲染 SVG。**不锁定位置** —— 展开结束继续跟随鼠标。"""
         self._move_anim.stop()
-        self._dragging = False
         self._pixmap = pixmap
-        self._is_expanded = True
+        self._has_svg = True
+        self._expanding = True
         start = self.geometry()
         self._anim.stop()
         self._anim.setStartValue(start)
@@ -7699,8 +7689,8 @@ class NodeHoverTip(QWidget):
     def hide_tip(self):
         self._anim.stop()
         self._move_anim.stop()
-        self._is_expanded = False
-        self._dragging = False
+        self._expanding = False
+        self._has_svg = False
         self.hide()
         self._label.clear()
         self._label.setPixmap(QPixmap())
@@ -7711,7 +7701,13 @@ class NodeView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         self.setRenderHint(QPainter.Antialiasing)
-        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        # 视口更新模式：**不要**改回 FullViewportUpdate。
+        # 实测（20 节点场景、同一进程内切换、模拟拖动 40 步的每步墙钟）：
+        #   Full 10.02 ms ／ Smart 5.83 ms ／ BoundingRect 4.50 ms ／ **Minimal 1.82 ms**
+        # 也就是说 Full 下每次改动都在重画整个视口（含内嵌的 proxy 控件），白扔约 5 倍。
+        # 若将来在真机上发现 Minimal 留下描画痕迹，退一步用 BoundingRectViewportUpdate，
+        # 但**不要**回到 FullViewportUpdate。
+        self.setViewportUpdateMode(QGraphicsView.MinimalViewportUpdate)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setAcceptDrops(True)
         self._connecting = False
@@ -7724,13 +7720,14 @@ class NodeView(QGraphicsView):
         self._drag_ghost = None
         self._highlighted_pw = None
         self._last_image_node = None  # 图纸拖入：记录最后放置的图纸（快速拼合）
-        # ---- 悬停 SVG 提示（0~4s thinking 平滑跟随，4s 拉开展示锁定可拖动，Esc 取消） ----
+        # ---- 悬停详情（满 HOVER_REVEAL_DELAY_S 秒展开；展开后仍跟随；点击穿透；Esc 取消） ----
         self._hover_tip = None        # NodeHoverTip（惰性创建）
         self._hover_item = None       # 当前悬停的目标元素框
         self._hover_enter = 0.0       # 进入时刻（time.monotonic 秒）
         self._hover_stage = 0         # 0无 1thinking 2预渲染 3展示
         self._hover_svg_path = None
         self._hover_pixmap = None
+        self._hover_enabled = True    # 总闸（工具栏「👁 悬停详情」；由 FlowEditorDialog 统一设置）
         self.viewport().setMouseTracking(True)
         self._hover_poll = QTimer(self)
         self._hover_poll.setInterval(200)
@@ -8594,7 +8591,7 @@ class NodeView(QGraphicsView):
             self._hover_tip = NodeHoverTip()
         tip = self._hover_tip
         x, y = self._hover_screen_pos()
-        if tip.isVisible() and not tip._is_expanded:
+        if tip.isVisible() and not tip._has_svg:
             # 不同元素框间快速切换：thinking 内容不变，平滑滑到新锚点
             tip.animate_move_to(x, y)
         else:
@@ -8607,43 +8604,60 @@ class NodeView(QGraphicsView):
         if self._hover_tip is not None:
             self._hover_tip.hide_tip()
 
+    # ---------- 悬停详情总闸 ----------
+    def set_hover_enabled(self, on):
+        """悬停详情总闸：关掉时**停掉 200 ms 轮询**并收掉已展开的提示。
+
+        只加 guard 不停定时器是不够的：轮询里每轮还会调 `QApplication.topLevelAt()`
+        （窗口系统查询），功能关掉就该一分钱不花。
+        """
+        self._hover_enabled = bool(on)
+        if self._hover_enabled:
+            self._hover_poll.start()
+        else:
+            self._hover_poll.stop()
+            self._hide_hover_tip()
+
+    def is_hover_enabled(self):
+        return bool(getattr(self, '_hover_enabled', True))
+
     def _hover_window_active(self):
         """悬停提示仅在本窗口可见且为活动窗口、鼠标确在本窗口上时触发，
-        防止隔着其他应用窗口仍弹出提示。鼠标在本悬停浮窗上（含外扩碰撞区、
-        拖动移动中）一律视为有效。"""
+        防止隔着其他应用窗口仍弹出提示。
+
+        浮窗现在是**点击穿透**的（`Qt.WindowTransparentForInput`）：鼠标事件直接落到下层
+        窗口，所以这里只需要看「鼠标最顶层窗口是不是本窗口」。下面仍保留一段 tip 兜底
+        判断 —— 万一某个平台的 `topLevelAt` 仍返回本浮窗，也不会误判成「鼠标在别的窗口上」
+        而把提示关掉。
+        """
         win = self.window()
         if win is None or not win.isVisible() or not win.isActiveWindow():
             return False
         gp = QCursor.pos()
-        tip = self._hover_tip
-        # ① 先按「几何关系」判：鼠标在本浮窗（含外扩碰撞区）里 → 一定仍在提示上。
-        #    这条必须排在最前，且不能依赖平台窗口枚举 —— 否则鼠标一移进 SVG 框，
-        #    下面 topLevelAt 若返回浮窗子控件就会判成「在其他窗口上」而立刻关闭。
-        if tip is not None and tip.contains_global(gp):
-            return True
-        # ② 再按「最顶层窗口」判：鼠标确实跑到别的应用/窗口上 → 失效。
         try:
             top = QApplication.topLevelAt(gp)
         except Exception:
-            top = None
-        if top is not None and top is not win:
-            if tip is not None:
-                try:
-                    if top is tip or tip.isAncestorOf(top):
-                        return True   # 鼠标在展示/拖动浮窗（或其子控件）上 → 保持有效
-                except Exception:
-                    pass
-            return False
-        return True
+            return True      # 平台查询失败时不阻断（宁可显示，也别让整块功能失效）
+        if top is None or top is win:
+            return True
+        tip = self._hover_tip
+        if tip is not None:
+            try:
+                if top is tip or tip.isAncestorOf(top):
+                    return True   # 兜底：鼠标确实落在展示浮窗（或其子控件）上
+            except Exception:
+                pass
+        return False
 
     def _poll_hover(self, pos=None):
         """轮询/鼠标移动时推进悬停提示阶段。pos=None 时取全局鼠标位置。
 
-        阶段：stage1 thinking(0~4s) 平滑跟随鼠标 → 4s 起 stage3 拉开展示 SVG
-        并锁定位置（不再跟随）；展示后可按住拖动停留。鼠标离开触发节点后，
-        只要仍在本框外扩的不可视碰撞区内就保持不关闭，移出碰撞区才退出；
-        Esc 始终可退出。
+        阶段：stage1/2 thinking（满 HOVER_REVEAL_DELAY_S 秒）→ stage3 拉开展示 SVG；
+        **展开后仍跟随鼠标**，鼠标不在本框上（或跑到别的框上）就立即收 / 换目标。
+        浮窗是点击穿透的，所以「鼠标落在浮窗上」不需要任何特殊处理（见 NodeHoverTip）。
         """
+        if not getattr(self, '_hover_enabled', True):
+            return
         if not self.scene() or not self.isVisible():
             return
         if not self._hover_window_active():
@@ -8654,26 +8668,23 @@ class NodeView(QGraphicsView):
         tip = self._hover_tip
         if pos is None:
             pos = self.viewport().mapFromGlobal(QCursor.pos())
-        gp = QCursor.pos() if pos is None else self.viewport().mapToGlobal(pos)
         in_viewport = self.viewport().rect().contains(pos)
 
-        # ---- stage3：SVG 展示已锁定，不再跟随鼠标，可拖动停留 ----
+        # ---- stage3：SVG 已展示 → 继续跟随鼠标；离开元素框立即收 ----
         if self._hover_stage >= 3 and self._hover_item is not None:
-            # ① 鼠标仍在本浮窗内（含框外 _GRAB 像素的不可视碰撞区）→ 直接保持展示。
-            #    这条必须**先判**：SVG 框很大、常常盖住画布上的其他元素框，
-            #    若先算命中就会把「鼠标移进框里」误判成「移到了另一个元素框」，
-            #    于是把浮窗关掉再开一个新的 —— 表现为「鼠标一进框就没了」。
-            if tip is not None and tip.contains_global(gp):
-                return
             on_item = self._hover_target_at(pos) if in_viewport else None
-            if on_item is not None and on_item is not self._hover_item:
+            if on_item is self._hover_item:
+                # 仍停留在原触发节点上 → 保持展示，并跟着鼠标走（点击穿透，挡不住操作）
+                if tip is not None and tip.isVisible():
+                    x, y = self._hover_screen_pos()
+                    tip.animate_move_to(x, y)
+                return
+            if on_item is not None:
                 # 鼠标移到另一元素框 → 结束当前展示，开始该元素的新一轮悬停
                 self._hide_hover_tip()
                 self._start_hover(on_item)
                 return
-            if on_item is self._hover_item:
-                return            # 仍停留在原触发节点上 → 保持展示
-            self._hide_hover_tip()  # 已彻底移出碰撞区 → 直接退出 SVG
+            self._hide_hover_tip()   # 鼠标离开所有元素框 → 立即收
             return
 
         # ---- stage1/2：thinking 阶段（需鼠标在画布内）----
@@ -8691,8 +8702,8 @@ class NodeView(QGraphicsView):
         if self._hover_item is None:
             return
         elapsed = time.monotonic() - self._hover_enter
-        if elapsed >= 4.0:
-            # 4s：预渲染 SVG（若尚未）→ 拉开展示框并锁定（不再跟随鼠标）
+        if elapsed >= HOVER_REVEAL_DELAY_S:
+            # 到点：预渲染 SVG（若尚未）→ 拉开展示框（展开结束仍跟随鼠标）
             if self._hover_stage < 2:
                 self._hover_stage = 2
                 self._hover_pixmap = self._render_svg_pixmap(self._hover_item)
@@ -8703,16 +8714,21 @@ class NodeView(QGraphicsView):
                     x, y = self._hover_screen_pos()
                     tip.expand_to(x, y, pm.width() + 20, pm.height() + 20, pm)
             return
-        # 4s 前：thinking 框平滑跟随鼠标锚点
+        # 到点前：thinking 框平滑跟随鼠标锚点
         if tip is not None and tip.isVisible():
             x, y = self._hover_screen_pos()
             tip.animate_move_to(x, y)
 
     def mouseMoveEvent(self, event):
-        # 悬停提示即时跟随（连线/框选/平移时不干扰）
-        if not (self._connecting or
-                (hasattr(self, '_rubber_band') and self._rubber_band) or
-                self._panning):
+        # 悬停详情即时推进（连线/框选/平移时不干扰，且把已展开的提示收掉 ——
+        # 它会跟着鼠标跑到正要连的目标上，虽然点击穿透，但视觉上挡路）
+        _busy = (self._connecting or
+                 (hasattr(self, '_rubber_band') and self._rubber_band) or
+                 self._panning)
+        if _busy:
+            if self._hover_item is not None:
+                self._hide_hover_tip()
+        else:
             self._poll_hover(event.pos())
         if self._connecting:
             self._edge_last_pos = event.pos()
@@ -9791,6 +9807,8 @@ class FlowEditorDialog(QDialog):
         self._rich_window_end = 0        # 窗口结束日志行索引（不含）
         self._log_follow_tail = True     # True=窗口跟随最新输出（自动折叠旧行）
         self._rich_refresh_timer = None  # 富文本追加防抖定时器（_build_tab_content 创建）
+        self._plain_buf = []             # 纯文本日志缓冲（去抖后批量插入，见 _flush_plain_append）
+        self._plain_flush_timer = None   # 纯文本追加去抖定时器（_build_tab_content 创建）
         self._rich_block_cache = {}      # {日志块起点行: 渲染HTML片段}（着色缓存）
         # 富文本增量追加账本：[[起始行, 结束行, 该段产生的文档块数], ...]，
         # 按行号连续排列，与文档现有块一一对应（头部裁剪时同步出队）。
@@ -9798,6 +9816,15 @@ class FlowEditorDialog(QDialog):
         self._rich_doc_segs = []
         self._suppress_scroll_load = False  # setValue 期间抑制滚动加载（防递归）
         self._log_clearing = False       # 清空日志防重入守卫
+        # ---- 悬停详情总闸（工具栏「👁 悬停详情」；默认开、可记住）----
+        # 用户反馈「悬停详情会影响画布操作」→ 给一个「我现在要专心」的总闸；
+        # 关掉时连该视图的 200 ms 轮询一起停（见 NodeView.set_hover_enabled）。
+        self._hover_enabled = True
+        try:
+            import ui_prefs
+            self._hover_enabled = bool(ui_prefs.get('hover_detail', True))
+        except Exception:
+            pass
         # ---- 多流程图选项卡：每个选项卡独立场景/视图/日志/输出，常加载切换 ----
         self._tabs = []        # 选项卡状态列表
         self._active_tab = -1  # 当前激活选项卡索引
@@ -9805,6 +9832,8 @@ class FlowEditorDialog(QDialog):
         self._dirty = False    # 当前选项卡是否有未保存更改
         self._init_ui()
         self._register_initial_tab()
+        # 初始选项卡的 view 到这里才存在 → 补套一次总闸（新图纸走 _new_tab 里的同步）
+        self._apply_hover_enabled()
         self._populate_api_list()
         self._refresh_flow_list()
         self.undo_mgr.save()
@@ -9958,6 +9987,37 @@ class FlowEditorDialog(QDialog):
         except Exception:
             pass
 
+    # ---------- 悬停详情总闸 ----------
+    def _refresh_hover_tip_btn(self):
+        """按总闸状态刷新工具栏按钮文字（checked = 功能开）。"""
+        btn = getattr(self, 'btn_hover_tip', None)
+        if btn is not None:
+            btn.setText('👁 悬停详情' if btn.isChecked() else '👁 悬停详情（关）')
+
+    def _apply_hover_enabled(self):
+        """把总闸状态套到**所有**选项卡的视图上。
+
+        每个图纸选项卡各有自己的 `NodeView`（各有各的 200 ms 轮询定时器），
+        只改当前视图会漏掉别的图纸 —— 切过去就发现「开关没生效」。
+        """
+        for tab in getattr(self, '_tabs', None) or []:
+            view = tab.get('view') if isinstance(tab, dict) else None
+            if view is not None and hasattr(view, 'set_hover_enabled'):
+                try:
+                    view.set_hover_enabled(self._hover_enabled)
+                except Exception:
+                    pass
+
+    def _on_hover_tip_toggled(self, on):
+        self._hover_enabled = bool(on)
+        self._apply_hover_enabled()
+        self._refresh_hover_tip_btn()
+        try:
+            import ui_prefs
+            ui_prefs.set('hover_detail', bool(on))
+        except Exception:
+            pass
+
     def _init_ui(self):
         main = QVBoxLayout(self)
         tb = QHBoxLayout()
@@ -10024,6 +10084,29 @@ class FlowEditorDialog(QDialog):
 
         self._poll_group.setVisible(False)      # 默认收起
         tb.addWidget(self._poll_group)
+
+        # ---- 悬停详情总闸：画布上悬停元素框弹出的详情框（默认开，状态会记住）----
+        # 由来：悬停详情会在连线/精修时挡视线，需要一个「我现在要专心」的开关。
+        # checked = 功能开；关掉时 NodeView 连 200 ms 轮询一起停（见 set_hover_enabled）。
+        self.btn_hover_tip = QToolButton()
+        self.btn_hover_tip.setCheckable(True)
+        self.btn_hover_tip.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_hover_tip.setStyleSheet(
+            "QToolButton { background:transparent; color:#8ab8ff; "
+            "border:1px solid #3a4a5a; border-radius:3px; padding:4px 8px; "
+            "font-size:11px; }"
+            "QToolButton:hover { background:#1e3a5a; }"
+            "QToolButton:checked { background:#1e3a5a; color:#dceaf8; }")
+        self.btn_hover_tip.setToolTip(
+            "画布悬停详情（默认开）：鼠标停在元素框上约 0.25 秒，弹出它的端口清单与当前值。\n"
+            "· 浮窗点击穿透：不挡下面的框，也不吃点击\n"
+            "· 鼠标离开元素框立即收起；展开后仍跟随鼠标\n"
+            "关掉它 = 画布完全不受打扰（专心连线 / 拖框时用），状态会被记住。")
+        self.btn_hover_tip.setChecked(bool(getattr(self, '_hover_enabled', True)))
+        self._refresh_hover_tip_btn()
+        # 信号最后接：setChecked 不触发（否则启动时会白写一次偏好）
+        self.btn_hover_tip.toggled.connect(self._on_hover_tip_toggled)
+        tb.addWidget(self.btn_hover_tip)
 
         tb.addWidget(QLabel(""))
 

@@ -55,3 +55,7 @@ data/api_config.default.json
 # 新手引导的「看过」标记（用户本机状态，不入库也不随包）
 data/ui_state.json
 data/ui_state.json.tmp
+
+# 本机 UI 偏好（悬停详情总闸；以后的主题偏好也落这里）—— 不入库也不随包
+data/ui_prefs.json
+data/ui_prefs.json.tmp
