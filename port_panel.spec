@@ -60,6 +60,9 @@ hiddenimports = [
     # 本项目的本地模块（有的在函数里才 import，静态分析追不到）
     'dark_theme', 'logger_manager', 'secure_store', 'api_config_dialog',
     'aliyun_client',
+    # 本机 UI 偏好（A1 悬停详情总闸引入）：在 FlowEditorDialog 里是**函数内 import**
+    # 且被 try/except 包着 —— 漏了它不会崩，但偏好读不到也写不进（总闸会静默退回默认开）
+    'ui_prefs',
     # 新手引导层：引擎与脚本都是在方法里**延迟 import** 的，显式列出来最稳
     # （否则 PyInstaller 有可能追不到，打包版点「🎓 新手引导」会报模块不可用）
     'tour_layer', 'tour_script_panel',
