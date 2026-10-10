@@ -29,6 +29,8 @@ from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter, QPen, QRegion
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
                                QPushButton, QVBoxLayout, QWidget)
 
+from portpanel.core.paths import project_root
+
 # ==================== 外观常量（固定深色，与 dark_theme 同一套色） ====================
 DIM_ALPHA = 165                    # 遮罩不透明度（0-255）
 HOLE_PAD = 6                       # 聚光灯比控件外扩多少像素
@@ -573,7 +575,7 @@ class GuidedTour(QObject):
 
 # ==================== 首次运行标记（看过就不再自动弹） ====================
 def _state_path() -> str:
-    root = os.path.dirname(os.path.abspath(__file__))
+    root = project_root()
     return os.path.join(root, 'data', 'ui_state.json')
 
 

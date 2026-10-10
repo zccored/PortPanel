@@ -7,7 +7,7 @@
 - 密码不落盘明文，仅保存随机盐 + HMAC 验证串 + 上次验证的 UTC 时间戳
 
 用法：
-    import secure_store
+    from portpanel.integration import secure_store
     secure_store.unlock("我的密码")          # 首次自动建会话；之后用 HMAC 验证
     plain = secure_store.get_plaintext(path) # 密文文件 → 解密到内存；旧明文 → 原样缓存
     secure_store.set_plaintext(path, data)   # 明文写内存 + 密文写盘（未解锁则不落盘）
@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import datetime
 import threading
+from portpanel.core.paths import project_root
 
 try:
     from cryptography.fernet import Fernet
@@ -31,7 +32,7 @@ except ImportError:  # pragma: no cover
     HAS_CRYPTOGRAPHY = False
     Fernet = None
 
-_BASE = os.path.dirname(os.path.abspath(__file__))
+_BASE = project_root()
 _SESSION_FILE = os.path.join(_BASE, 'data', 'secure_session.json')
 _MAGIC = b'SEC2'           # 密文容器魔数
 _PBKDF2_ITER = 200_000

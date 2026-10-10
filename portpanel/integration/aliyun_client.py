@@ -21,6 +21,7 @@ import urllib.parse
 import tempfile
 import requests
 from typing import Optional, Dict, Any
+from portpanel.core.paths import project_root
 
 # 阿里云 OSS SDK
 try:
@@ -859,7 +860,7 @@ def ensure_oss_initialized():
     
     # 尝试从配置文件读取配置并初始化
     try:
-        config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "./data/api_config.json")
+        config_file = os.path.join(project_root(), "data", "api_config.json")
         
         if not os.path.exists(config_file):
             client.logger.warning(f"OSS配置文件不存在: {config_file}")
@@ -1755,7 +1756,7 @@ class AliyunProxyClient(QObject):
         """获取代理服务器配置"""
         try:
             # 从现有配置系统获取代理设置
-            config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "./data/api_config.json")
+            config_file = os.path.join(project_root(), "data", "api_config.json")
             
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:

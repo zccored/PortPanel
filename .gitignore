@@ -56,6 +56,21 @@ data/api_config.default.json
 data/ui_state.json
 data/ui_state.json.tmp
 
+# ⚠ 2026-10-11 事故：拆包后的路径 bug 让程序在包内重建了 data/，
+# 而上面那些 data/... 规则只匹配仓库根，漏掉了包内路径 ——
+# 结果加密的 api_config.json 被 git add -A 收了进去并推到了公开仓库。
+# 用 ** 兜住任意层级，杜绝再犯。
+**/api_config.json
+**/api_config.json.plain.backup
+**/secure_session.json
+**/ui_state.json
+**/ui_state.json.tmp
+**/webtree/
+**/manifest/
+**/webAPI/
+portpanel/ui/data/
+portpanel/integration/data/
+
 # 本机 UI 偏好（悬停详情总闸；以后的主题偏好也落这里）—— 不入库也不随包
-data/ui_prefs.json
-data/ui_prefs.json.tmp
+**/ui_prefs.json
+**/ui_prefs.json.tmp

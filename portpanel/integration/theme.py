@@ -7,7 +7,7 @@
 两条路径用的是逐字相同的调色板与样式表，也就不会出现"两处各异"。
 
 用法：
-    from dark_theme import build_dark_palette, DARK_STYLESHEET, apply_dark_theme
+    from portpanel.integration.theme import build_dark_palette, DARK_STYLESHEET, apply_dark_theme
     apply_dark_theme(dialog)                  # 固定某个窗口
     QApplication.setPalette(build_dark_palette())   # 全局
 """
