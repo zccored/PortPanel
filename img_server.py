@@ -7538,7 +7538,7 @@ _HOVER_PORT_MAX_ROWS = 7     # 一屏最多列几行，超出折叠成「另有 
 # 为什么是 0.25 而不是原来的 4.0：4 s 的唯一目的是「别在扫鼠标时乱弹」——
 # 当时浮窗会截获鼠标事件、展开后又锁住位置，只能靠长等待来降低撞上的概率。
 # 现在浮窗点击穿透 + 离开即收（见 NodeHoverTip / NodeView._poll_hover），
-# 长等待失去意义。改动前的实测（docs/_local/tools/measure_hover_tip.py）：
+# 长等待失去意义。改动前的实测（本机量测脚本，私有不入库）：
 # 「悬停 → 内容可见」要 4.44 s，其中真·渲染只有 5–31 ms（99.4% 是等待与动效）。
 HOVER_REVEAL_DELAY_S = 0.25
 
@@ -7592,7 +7592,7 @@ class NodeHoverTip(QWidget):
       落在它上面的点击 / 拖动会穿透到画布。所以这里**不处理鼠标事件** —— 早期版本
       「把挡路的浮窗拖走」的能力是**故意去掉的**（穿透之后这个需求本身就不存在了）。
       要改回可交互，得先想清楚它会重新挡住操作，并配合「按键门控」之类的方案
-      （缓冲带也要一起加回来，见 `.agents/memory/knowledge/pitfalls.md` G 节）。
+      （缓冲带也要一起加回来 —— 本机记忆里记过这条坑）。
     - **两个动效不要同时跑**：`_anim` 动的是 geometry（含位置），`_move_anim` 动的是 pos ——
       同时进行会互相覆盖、抖动。所以 `animate_move_to()` 在展开动效未结束时直接返回。
     """
@@ -7727,7 +7727,7 @@ class NodeView(QGraphicsView):
         self._hover_stage = 0         # 0无 1thinking 2预渲染 3展示
         self._hover_svg_path = None
         self._hover_pixmap = None
-        self._hover_enabled = True    # 总闸（工具栏「👁 悬停详情」；由 FlowEditorDialog 统一设置）
+        self._hover_enabled = True    # 总闸（工具栏「悬停详情」；由 FlowEditorDialog 统一设置）
         self.viewport().setMouseTracking(True)
         self._hover_poll = QTimer(self)
         self._hover_poll.setInterval(200)
@@ -9816,7 +9816,7 @@ class FlowEditorDialog(QDialog):
         self._rich_doc_segs = []
         self._suppress_scroll_load = False  # setValue 期间抑制滚动加载（防递归）
         self._log_clearing = False       # 清空日志防重入守卫
-        # ---- 悬停详情总闸（工具栏「👁 悬停详情」；默认开、可记住）----
+        # ---- 悬停详情总闸（工具栏「悬停详情」；默认开、可记住）----
         # 用户反馈「悬停详情会影响画布操作」→ 给一个「我现在要专心」的总闸；
         # 关掉时连该视图的 200 ms 轮询一起停（见 NodeView.set_hover_enabled）。
         self._hover_enabled = True
@@ -9992,7 +9992,7 @@ class FlowEditorDialog(QDialog):
         """按总闸状态刷新工具栏按钮文字（checked = 功能开）。"""
         btn = getattr(self, 'btn_hover_tip', None)
         if btn is not None:
-            btn.setText('👁 悬停详情' if btn.isChecked() else '👁 悬停详情（关）')
+            btn.setText('悬停详情' if btn.isChecked() else '悬停详情（关）')
 
     def _apply_hover_enabled(self):
         """把总闸状态套到**所有**选项卡的视图上。

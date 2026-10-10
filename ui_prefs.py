@@ -4,9 +4,9 @@
 现在只有一项 `hover_detail`（画布悬停详情总闸）。**为什么单独立一个模块**，
 而不是塞进 `img_server.py`：
 
-- `img_server.py` 正在按既定方向**拆分**（见 `docs/_local/method-split-2026-10-10.md`），
+- `img_server.py` 正在按既定方向**拆分**（方法级刀口表已产出，见本机私有文档），
   新的小状态不该再往里加；
-- 亮 / 暗主题等后续 UI 偏好也要落在同一处（`docs/_local/backlog-2026-10-10.md` §三），
+- 亮 / 暗主题等后续 UI 偏好也要落在同一处（本机待办总表 §三「新需求」），
   一次加一个文件、后面共用；
 - 没有 Qt 依赖，Web 侧（阶段 2/3）以后读同一份偏好，不会出现两套设置。
 
@@ -22,7 +22,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 # 默认值集中在这里（新增偏好先加这一处，再在调用处 get 取用）
 DEFAULTS = {
-    'hover_detail': True,   # 画布悬停详情框（工具栏「👁 悬停详情」）
+    'hover_detail': True,   # 画布悬停详情框（工具栏「悬停详情」）
 }
 
 
