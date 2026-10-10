@@ -20,8 +20,9 @@ import unicodedata
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OUT = os.path.join(ROOT, 'design', 'generated', 'emoji-inventory.md')
-FILES = ['img_server.py', 'api_config_dialog.py', 'port_panel.py', 'tour_layer.py',
-         'tour_script_panel.py', 'tour_script_image_source.py', 'web_config_pilot.py']
+FILES = ['portpanel/ui/flow_editor.py', 'portpanel/ui/image_source.py', 'port_panel.py',
+         'portpanel/ui/tour_layer.py', 'portpanel/ui/tour_script_panel.py',
+         'portpanel/ui/tour_script_image_source.py', 'web_config_pilot.py']
 
 # 「像日志/纯文本」的上下文 → emoji 可保留（日志里直观，且已在 _strip_emoji 处理过富文本）
 LOG_HINT = re.compile(r'\.append\(|print\(|\.log\b|log_received|_log_|session_log|f["\']')
