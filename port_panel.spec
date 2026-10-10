@@ -57,12 +57,15 @@ hiddenimports = [
     # Qt 侧：SVG 渲染是悬停提示框的命脉，PyInstaller 不会自动追
     'PySide6.QtSvg', 'PySide6.QtSvgWidgets', 'PySide6.QtNetwork',
     'PySide6.QtPrintSupport',
-    # 本项目的本地模块（有的在函数里才 import，静态分析追不到）
-    'dark_theme', 'logger_manager', 'secure_store', 'api_config_dialog',
-    'aliyun_client',
+    # 本项目的包内模块（拆包后按全限定名；不少是延迟 import，静态分析追不到）
+    'portpanel', 'portpanel.core', 'portpanel.engine',
+    'portpanel.integration.theme', 'portpanel.integration.logger',
+    'portpanel.integration.secure_store', 'portpanel.integration.aliyun_client',
+    'portpanel.ui.flow_editor', 'portpanel.ui.image_source',
     # 新手引导层：引擎与脚本都是在方法里**延迟 import** 的，显式列出来最稳
-    # （否则 PyInstaller 有可能追不到，打包版点「🎓 新手引导」会报模块不可用）
-    'tour_layer', 'tour_script_panel',
+    # （否则 PyInstaller 可能追不到，打包版点「🎓 新手引导」会报模块不可用）
+    'portpanel.ui.tour_layer', 'portpanel.ui.tour_script_panel',
+    'portpanel.ui.tour_script_image_source',
     # 第三方
     'bs4', 'requests', 'cryptography', 'openpyxl', 'websockets', 'aiohttp',
     'oss2', 'curl_cffi',

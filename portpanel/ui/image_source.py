@@ -27,11 +27,11 @@ try:
 except ImportError:
     HAS_CURL_CFFI = False
     curl_requests = None
-from logger_manager import global_logger
+from portpanel.integration.logger import global_logger
 import hashlib
 import base64
 try:
-    import secure_store
+    from portpanel.integration import secure_store
 except ImportError:
     secure_store = None
 try:
@@ -42,11 +42,11 @@ except ImportError:
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from aliyun_client import get_local_sync_server, start_local_sync_server
+from portpanel.integration.aliyun_client import get_local_sync_server, start_local_sync_server
 
 # 尝试导入阿里云客户端
 try:
-    from aliyun_client import (get_global_aliyun_client, initialize_aliyun_services,
+    from portpanel.integration.aliyun_client import (get_global_aliyun_client, initialize_aliyun_services,
                               test_aliyun_connection, send_verification_bytes)
     HAS_ALIYUN = True
 except ImportError:
@@ -2687,8 +2687,8 @@ class APIConfigDialog(QDialog):
         if os.environ.get('PORT_PANEL_NO_TOUR') == '1':
             return
         try:
-            from tour_layer import tour_seen
-            from tour_script_image_source import TOUR_KEY
+            from portpanel.ui.tour_layer import tour_seen
+            from portpanel.ui.tour_script_image_source import TOUR_KEY
         except Exception:
             return
         if tour_seen(TOUR_KEY):
@@ -2712,8 +2712,8 @@ class APIConfigDialog(QDialog):
             except RuntimeError:
                 self._tour = None
         try:
-            from tour_layer import GuidedTour
-            from tour_script_image_source import TOUR_KEY, image_source_tour_steps
+            from portpanel.ui.tour_layer import GuidedTour
+            from portpanel.ui.tour_script_image_source import TOUR_KEY, image_source_tour_steps
         except Exception as e:                                  # noqa: BLE001
             QMessageBox.warning(self, '新手引导', f'引导模块不可用：{e}')
             return
@@ -2729,7 +2729,7 @@ class APIConfigDialog(QDialog):
     def _on_tour_finished(self, key, completed):
         """引导收工：走完或跳过都记成"看过"，下次不再自动弹。"""
         try:
-            from tour_layer import mark_tour_seen
+            from portpanel.ui.tour_layer import mark_tour_seen
             mark_tour_seen(key, True)
         except Exception:
             pass
@@ -4015,7 +4015,7 @@ class APIConfigDialog(QDialog):
 
     def update_oss_status(self):
         try:
-            from aliyun_client import ensure_oss_initialized, get_global_aliyun_client
+            from portpanel.integration.aliyun_client import ensure_oss_initialized, get_global_aliyun_client
             if ensure_oss_initialized():
                 client = get_global_aliyun_client()
                 if client.connected:
@@ -4033,7 +4033,7 @@ class APIConfigDialog(QDialog):
 
     def test_oss_connection(self):
         try:
-            from aliyun_client import ensure_oss_initialized, get_global_aliyun_client
+            from portpanel.integration.aliyun_client import ensure_oss_initialized, get_global_aliyun_client
             self.save_aliyun_config()
             if ensure_oss_initialized():
                 client = get_global_aliyun_client()
@@ -4060,7 +4060,7 @@ class APIConfigDialog(QDialog):
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(self.config, f, indent=4)
-            from aliyun_client import get_global_aliyun_client
+            from portpanel.integration.aliyun_client import get_global_aliyun_client
             client = get_global_aliyun_client()
             if (aliyun_config["aliyun_access_key_id"] and aliyun_config["aliyun_access_key_secret"]):
                 client.set_config(
@@ -4704,7 +4704,7 @@ class ImageSourceConfigDialog(APIConfigDialog):
         super().__init__(parent)
         # 黑夜模式：独立窗口没有主程序那样的父窗口可继承，显式套一份与主程序相同的深色主题
         try:
-            from dark_theme import apply_dark_theme
+            from portpanel.integration.theme import apply_dark_theme
             apply_dark_theme(self)
         except Exception:
             pass

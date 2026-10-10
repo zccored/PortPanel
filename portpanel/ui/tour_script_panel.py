@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import List
 
-from tour_layer import TourStep
+from portpanel.ui.tour_layer import TourStep
 
 # 首次运行自动弹的标记键；改这里等于换一套"看过没看过"的记录
 TOUR_KEY = 'port_panel_v1'
@@ -47,7 +47,7 @@ def _tab_count(dlg) -> int:
 def _container_count(dlg) -> int:
     """当前图纸画布上有几个「容器框」。"""
     try:
-        from img_server import ContainerNode
+        from portpanel.ui.flow_editor import ContainerNode
         scene = dlg._tabs[dlg._active_tab].get('scene')
         if scene is None:
             return -1

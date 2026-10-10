@@ -7,7 +7,7 @@
 - 密码不落盘明文，仅保存随机盐 + HMAC 验证串 + 上次验证的 UTC 时间戳
 
 用法：
-    import secure_store
+    from portpanel.integration import secure_store
     secure_store.unlock("我的密码")          # 首次自动建会话；之后用 HMAC 验证
     plain = secure_store.get_plaintext(path) # 密文文件 → 解密到内存；旧明文 → 原样缓存
     secure_store.set_plaintext(path, data)   # 明文写内存 + 密文写盘（未解锁则不落盘）

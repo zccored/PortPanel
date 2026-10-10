@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from tour_layer import TourStep
+from portpanel.ui.tour_layer import TourStep
 
 # 首次运行自动弹的标记键（与端口画板那份互相独立）
 TOUR_KEY = 'image_source_v1'

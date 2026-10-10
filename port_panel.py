@@ -48,12 +48,12 @@ def main() -> int:
     # 全局深色：单独运行时没有 MainWindow 帮忙设，这里补上；
     # FlowEditorDialog 自己还会再套一份（防止被当子窗口用时继承到浅色）。
     try:
-        from dark_theme import build_dark_palette
+        from portpanel.integration.theme import build_dark_palette
         app.setPalette(build_dark_palette())
     except Exception:
         pass
 
-    from img_server import FlowEditorDialog
+    from portpanel.ui.flow_editor import FlowEditorDialog
     dlg = FlowEditorDialog()
     dlg.show()
     return app.exec()

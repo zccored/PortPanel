@@ -29,7 +29,7 @@ from PySide6.QtGui import (
     QWheelEvent, QKeyEvent, QTextCursor, QPixmap, QPalette, QCursor
 )
 
-from api_config_dialog import (APIConfigDialog, ImageSourceConfigDialog,
+from portpanel.ui.image_source import (APIConfigDialog, ImageSourceConfigDialog,
                                build_browser_headers,
                                resolve_env_in_headers, resolve_header_placeholders,
                                mask_header_value, describe_headers, is_sensitive_header,
@@ -9748,7 +9748,7 @@ class FlowEditorDialog(QDialog):
         # 发给别的用户，那时它没有父窗口，会跟随系统主题（浅色 Windows 上就是一片白）。
         # 这里显式套一份与主程序**逐字相同**的调色板 + 样式表，两种情况外观一致。
         try:
-            from dark_theme import apply_dark_theme
+            from portpanel.integration.theme import apply_dark_theme
             apply_dark_theme(self)
         except Exception:
             pass
@@ -9855,8 +9855,8 @@ class FlowEditorDialog(QDialog):
         if os.environ.get('PORT_PANEL_NO_TOUR') == '1':
             return
         try:
-            from tour_layer import tour_seen
-            from tour_script_panel import TOUR_KEY
+            from portpanel.ui.tour_layer import tour_seen
+            from portpanel.ui.tour_script_panel import TOUR_KEY
         except Exception:
             return
         if tour_seen(TOUR_KEY):
@@ -9883,8 +9883,8 @@ class FlowEditorDialog(QDialog):
             QMessageBox.information(self, '新手引导', '流程正在执行中，先停下再开引导吧。')
             return
         try:
-            from tour_layer import GuidedTour
-            from tour_script_panel import TOUR_KEY, panel_tour_steps
+            from portpanel.ui.tour_layer import GuidedTour
+            from portpanel.ui.tour_script_panel import TOUR_KEY, panel_tour_steps
         except Exception as e:                                  # noqa: BLE001
             QMessageBox.warning(self, '新手引导', f'引导模块不可用：{e}')
             return
@@ -9904,7 +9904,7 @@ class FlowEditorDialog(QDialog):
         那时它自己还在跑收尾代码；提前丢掉最后一个 Python 引用会让它在半路被回收。）
         """
         try:
-            from tour_layer import mark_tour_seen
+            from portpanel.ui.tour_layer import mark_tour_seen
             mark_tour_seen(key, True)
         except Exception:
             pass
