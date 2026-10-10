@@ -4,3 +4,11 @@
 *.spec text eol=lf
 *.svg text eol=lf
 *.wbt text eol=lf
+# 前端与文本杂项（2026-10-11 补：本机 core.autocrlf=true 时这些不带 eol 会变 CRLF，
+# 于是批量改文件后 git diff 会刷「LF will be replaced by CRLF」的警告）
+*.ts text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf

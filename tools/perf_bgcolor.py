@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """量出绘图区真实背景色，并算出"按背景预混后"的不透明网格色。"""
 import os
 import sys
