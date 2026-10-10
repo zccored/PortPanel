@@ -38,6 +38,6 @@ python design/tools/gen_icons.py  --check    # ICONS_OK  / ICONS_DRIFT
 
 ## 尚未接线（重要）
 
-`design/generated/qt_tokens.py` 目前只是**候选常量**，还没有被 `dark_theme.py` 引用。
-原因：`dark_theme.py` 与宿主程序（全栈图库管理器）**共用**，把它的字面量替换成这些常量属于一次真实重构，
-必须单独评估（否则会影响宿主的外观）。当前这一步只保证：**同一份 token 能同时产出 Qt 与 Web 两边可用的值。**
+`design/generated/qt_tokens.py` 目前只是**候选常量**，还没有被 `portpanel/integration/theme.py` 引用。
+接线（把 `theme.py` 里的字面量换成这些常量）属于一次真实重构，要单独评估并跑一遍界面回归。
+当前这一步只保证：**同一份 token 能同时产出 Qt 与 Web 两边可用的值。**

@@ -3,7 +3,7 @@
 # 端口画板（PortPanel）· 「图源配置」Web 化试点（阶段 0）
 # Copyright (C) 2026 zccored  ·  AGPL-3.0-only（见 LICENSE）
 #
-# 零侵入：**不修改** port_panel.py / img_server.py / api_config_dialog.py，
+# 零侵入：**不修改** port_panel.py / portpanel/ui/flow_editor.py / portpanel/ui/image_source.py，
 # 独立启动：python web_config_pilot.py            看界面（正常窗口）
 #           python web_config_pilot.py --selftest 自测：量 4 个数后自动退出
 #           python web_config_pilot.py --real     尝试只读真实配置（默认用伪造样本）
@@ -48,7 +48,7 @@ class _DiagPage(QWebEnginePage):
 class PilotWindow(QDialog):
     """「图源配置」的 Web 试点窗口：一个 QWebEngineView + QWebChannel 桥。
 
-    零侵入：本文件不 import img_server / api_config_dialog，也不会修改它们。
+    零侵入：只**读用** portpanel/ui/flow_editor.py 与 portpanel/ui/image_source.py 的既有实现，不改它们。
     """
 
     def __init__(self, state: dict, reason: str = '', selftest: bool = False):
@@ -186,7 +186,7 @@ def main() -> int:
 def try_load_real_state():
     """尝试**只读**真实配置并转成试点结构；失败或不存在则返回 (None, 原因)。
 
-    只读红线：走 secure_store.get_plaintext()（机器绑定密钥解密），**绝不写回** data/api_config.json。
+    只读红线：走 portpanel.integration.secure_store.get_plaintext()（机器绑定密钥解密），**绝不写回** data/api_config.json。
     本机当前没有 data/api_config.json，所以这条路径属于「best-effort」，schema 以实际配置为准。
     """
     cfg = os.path.join(ROOT, 'data', 'api_config.json')
@@ -245,8 +245,8 @@ def try_load_real_state():
 
 
 # ==================== 按需懒加载 ====================
-# 这几个功能（Cookie 导入 / 导入分享 / 调试请求 / 云服务）要用 api_config_dialog 的**唯一实现**，
-# 而那个模块顶部就 import requests / bs4 / cryptography / aliyun_client（冷启动约 6.5 s）——
+# 这几个功能（Cookie 导入 / 导入分享 / 调试请求 / 云服务）要用 portpanel/ui/image_source.py 的**唯一实现**，
+# 而那个模块顶部就 import requests / bs4 / cryptography / portpanel.integration.aliyun_client（冷启动约 6.5 s）——
 # 试点判据 ①（冷启动）会直接废掉。所以：**第一次用到才 import**，
 # 导入耗时记在 _api_import_ms 里并回给前端 —— 这个数正是阶段 2 的 EngineAPI 最关心的。
 _api_mod = None
@@ -312,7 +312,7 @@ class Bridge(QObject):
         return True
 
     # ==================== Cookie 导入（A3-1）====================
-    # 复用 api_config_dialog 的 parse_cookie_text / describe_cookie / suggest_cookie_env_name /
+    # 复用 portpanel.ui.image_source 的 parse_cookie_text / describe_cookie / suggest_cookie_env_name /
     # env_status_text / env_is_persisted / reload_env_from_system —— **不重写第二套**。
     #
     # 明文边界（与交付文档 §3 凭据红线对齐）：
@@ -418,7 +418,7 @@ class Bridge(QObject):
         return json.dumps(out, ensure_ascii=False)
 
     # ==================== 入口导入 / 分享（A3-2）====================
-    # 契约的唯一实现在 api_config_dialog.APIConfigDialog：
+    # 契约的唯一实现在 portpanel.ui.image_source.APIConfigDialog：
     #   导出：{"kind":"tianji.api_entry","version":1,"exported_at":…,"entry":{name,base_url,endpoints}}
     #   导入兼容三种形态：① 上面的 ② 裸入口 {name,base_url,endpoints} ③ 整包配置 {image_sources:[…]}
     #   重名自动加 " (2)" / " (3)"…
@@ -602,7 +602,7 @@ class Bridge(QObject):
     def _real_config(self):
         """**只读**读真实配置（返回 dict；读不到返回 None）。
 
-        与 `try_load_real_state` 同一条路：`secure_store.get_plaintext()`（机器绑定密钥解密），
+        与 `try_load_real_state` 同一条路：`portpanel.integration.secure_store.get_plaintext()`（机器绑定密钥解密），
         **绝不写回** data/api_config.json。云服务与请求头都从这里取，避免两处各写一份读取逻辑。
         """
         try:
@@ -772,8 +772,8 @@ DIST_DIR = os.path.join(ROOT, 'webui', 'dist')
 INDEX_HTML = os.path.join(DIST_DIR, 'index.html')
 EXPORT_DIR = os.path.join(os.environ.get('TEMP', ROOT), 'portpanel_pilot')
 
-# 敏感头的判定（与 api_config_dialog.is_sensitive_header 同口径的本地简化版：
-# 试点不去 import 那个模块，避免拉起 aliyun_client 等无关依赖）
+# 敏感头的判定（与 portpanel.ui.image_source.is_sensitive_header 同口径的本地简化版：
+# 试点不去 import 那个模块，避免拉起 portpanel.integration.aliyun_client 等无关依赖）
 _SENSITIVE_HINTS = ('cookie', 'authorization', 'auth', 'token', 'session', 'key', 'secret')
 
 

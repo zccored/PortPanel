@@ -19,7 +19,7 @@
 
 它做的事情很少，一眼能看完：
   1. 建 QApplication；
-  2. 把全局调色板也设成深色（`dark_theme`）—— 主程序里这一步由 MainWindow 做，
+  2. 把全局调色板也设成深色（`portpanel.integration.theme`）—— 主程序里这一步由 MainWindow 做，
      单独跑时没人做，不设的话在浅色 Windows 上会是一片白；
   3. 开 `FlowEditorDialog`（就是端口画板本体）并进入事件循环。
 

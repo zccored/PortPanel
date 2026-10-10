@@ -7,8 +7,8 @@
 
 产物：
     webui/src/styles/tokens.css          ← Web 侧（Vue/Vite 直接 import）
-    design/generated/qt_tokens.py        ← Qt 侧常量（**尚未接线**；接进 dark_theme.py 属后续动作，
-                                            因为 dark_theme.py 与宿主程序共用，改动要单独评估）
+    design/generated/qt_tokens.py        ← Qt 侧常量（**尚未接线**；接进
+                                            portpanel/integration/theme.py 属后续动作，要单独评估）
 
 零副作用原则：只写上面两个产物；`--check` 模式完全不写。
 """
@@ -83,9 +83,9 @@ def render_qt(tokens: dict) -> str:
         '# -*- coding: utf-8 -*-',
         '# 本文件由 design/tools/gen_tokens.py 生成 —— 不要手工改。',
         '#',
-        '# 用途：Qt 侧（dark_theme.py）的**候选**常量。',
-        '# ⚠️ 尚未接线：dark_theme.py 与宿主程序（全栈图库管理器）共用，',
-        '#    把它的字面量换成这些常量属于一次真实重构，需要单独评估后再做。',
+        '# 用途：Qt 侧（portpanel/integration/theme.py）的**候选**常量。',
+        '# ⚠️ 尚未接线：把 theme.py 里的字面量换成这些常量属于一次真实重构，',
+        '#    要单独评估并跑一遍界面回归后再做（本仓库的 theme.py 是自有模块）。',
         '#    当前只保证「同一份 token 能同时产出 Qt 与 Web 两边的值」。',
         '',
         'COLORS = {',

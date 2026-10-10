@@ -1,7 +1,7 @@
 # 端口画板 · Web 前端（阶段 0 试点）
 
 「图源配置」窗口的 Web 化试点：**Vue 3 + TypeScript + Vite**，由 `web_config_pilot.py` 用
-`QWebEngineView` + `QWebChannel` 装载。零侵入 —— 不改 `port_panel.py` / `img_server.py` / `api_config_dialog.py`。
+`QWebEngineView` + `QWebChannel` 装载。零侵入 —— 不改 `port_panel.py` / `portpanel/ui/flow_editor.py` / `portpanel/ui/image_source.py`。
 
 ## 开发 / 构建 / 运行
 
@@ -101,20 +101,20 @@ DemoView 还兼作图标清单（19 个图标全部渲染一遍，改名/漏图�
 | 方法 | 作用 | 备注 |
 | ---- | ---- | ---- |
 | `getState` / `exportState` / `echo` / `report` / `onStateChanged` | 阶段 0 原有：取状态、导出副本、往返基准、状态推送 | `exportState` 只写 `%TEMP%` 副本，**不写回**真实配置 |
-| `parseCookie(text, baseUrl)` | Cookie 文本 → 条数 / 描述 / 环境变量提示（认 7 种粘贴格式） | 解析在 **Python 侧**，复用 `api_config_dialog.parse_cookie_text` |
+| `parseCookie(text, baseUrl)` | Cookie 文本 → 条数 / 描述 / 环境变量提示（认 7 种粘贴格式） | 解析在 **Python 侧**，复用 `portpanel.ui.image_source.parse_cookie_text` |
 | `envStatus` / `envReload` | 环境变量在不在本进程 / 从注册表回读（只读） | 对应 Qt 侧的「环境变量状态」与「重新读取系统环境变量」 |
 | `envApply(name, value)` | 写进**本进程** + 把 `setx` 命令抄进剪贴板 | 与 Qt 侧同口径：**不替用户写注册表**（杀软眼里的持久化行为）；**明文不回前端** |
 | `setxCommand(name, value)` | 显式点按钮才调用：回 setx 命令（含明文）供手动复制 | 明文边界清楚、可审计 |
 | `parseEntry(text, names)` | `.apientry.json` 文本 → 可导入的入口列表 + 重名改名记录 | 兼容三种形态（入口文件 / 裸入口 / 整包 `image_sources`）；解析复用 Qt 侧 `_extract_entries_from_file` / `_unique_entry_name`（staticmethod） |
-| `buildEntry(source)` | 入口 → 可分享的 `.apientry.json` 内容 + 建议文件名 + 可复制文本 | 格式（`kind` / `version`）由 `api_config_dialog._entry_file_payload` 定义，**不在试点另写一份** |
+| `buildEntry(source)` | 入口 → 可分享的 `.apientry.json` 内容 + 建议文件名 + 可复制文本 | 格式（`kind` / `version`）由 `portpanel.ui.image_source._entry_file_payload` 定义，**不在试点另写一份** |
 | `writeEntry(payload, name)` / `saveEntryAs(payload)` | 写进 `%TEMP%/portpanel_pilot/` ／ 原生「另存为」对话框 | 前者给**无人值守测试**用；后者与 Qt 侧 `share_image_source` 同口径（取消不算错） |
 | `copyText(text)` | 写系统剪贴板 | `file://` 下前端拿不到系统剪贴板 → 走桥（与 Qt 侧同口径） |
 | `debugEndpoint(req)` / `debugResult(jobId)` | 起一次子端口调试（**异步 job + 轮询**）：真的发一次包，回状态码 / 响应体 / 请求头·响应头·诊断文本 | 与 Qt 侧同链路（`EndpointDebugWorker` → requests，被风控/403 自动降级 `curl_cffi`）；**真实请求头只在 Python 侧解析**（前端只给 `sourceName` + `path`），回来的 `info` 是 `_format_debug_info` 的成品（敏感头已打码）。一次调试最长 30 s 超时 → 不能阻塞 GUI 线程，所以用 jobId 轮询 |
 | `cloudState()` | 只读云服务配置现状（endpoint / bucket / region / KeyId 掩码 / 密钥是否已设置 / 客户端是否可用） | AccessKeySecret **不回前端**；配置键 `aliyun_*` 与 `image_sources` 在同一个 `data/api_config.json` 里 |
 | `aliyunTest()` / `aliyunResult(jobId)` | 起一次阿里云连接测试（同样是 job + 轮询） | 复用 `AliyunTestWorker`（`initialize_aliyun_services` → `test_aliyun_connection`）；配置不全时明确报"缺少哪些字段" |
 
-**为什么这些 API 用「按需懒加载」**：`api_config_dialog` 顶部就 import
-`requests / bs4 / cryptography / aliyun_client`，冷启动约 6.5 s。试点对它做的是
+**为什么这些 API 用「按需懒加载」**：`portpanel/ui/image_source.py` 顶部就 import
+`requests / bs4 / cryptography / portpanel.integration.aliyun_client`，冷启动约 6.5 s。试点对它做的是
 **第一次用到才 import**（实测 ≈1.0–1.1 s，冷启动不付这笔钱）—— 这个数正是阶段 2 的
 `EngineAPI` 最关心的。**不重写第二套解析**：口径与 Qt 侧一致，避免漂移。
 
@@ -132,4 +132,4 @@ DemoView 还兼作图标清单（19 个图标全部渲染一遍，改名/漏图�
 | ④ 体感分 | 待人工填写 | 现代感 / 满意度 ≥ 4 |
 
 对照：现有 Qt 版 `ImageSourceConfigDialog` 冷启动 ≈ 6.6 s（其中 import + 建 QApplication 就占 6.55 s，
-对话框本身 26 ms）—— 因为那条链路要 import `api_config_dialog` 及其重依赖。
+对话框本身 26 ms）—— 因为那条链路要 import `portpanel.ui.image_source` 及其重依赖。

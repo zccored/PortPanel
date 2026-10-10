@@ -17,7 +17,7 @@ cryptography==44.0.0       # api_config.json 的加密存储
 # ---- 表格 ----
 openpyxl==3.1.5            # 数据库框（CSV/Excel）
 
-# ---- 本地同步服务（api_config_dialog 会 import aliyun_client）----
+# ---- 本地同步服务（portpanel/integration/aliyun_client.py 依赖）----
 websockets==15.0.1
 aiohttp==3.9.3
 oss2==2.19.1

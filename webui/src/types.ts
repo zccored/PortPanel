@@ -55,7 +55,7 @@ export interface CookieParse {
   envReady: boolean
   envText: string
   placeholder: string
-  /** api_config_dialog 的懒加载耗时（首次调用才有值） */
+  /** portpanel.ui.image_source 的懒加载耗时（首次调用才有值） */
   importMs: number
 }
 
@@ -171,7 +171,7 @@ export interface CloudState {
   endpoint: string
   bucket: string
   region: string
-  /** 阿里云客户端模块（aliyun_client / oss2 + SDK）是否可用 */
+  /** 阿里云客户端模块（portpanel.integration.aliyun_client / oss2 + SDK）是否可用 */
   clientAvailable: boolean
   importMs?: number
   error?: string

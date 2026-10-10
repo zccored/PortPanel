@@ -5,7 +5,7 @@ import type { CookieParse } from '../types'
 import { Field, Icon, Modal, Tag } from './ui'
 
 // 「导入 Cookie」：与 Qt 侧 CookieImportDialog 同流程（粘贴 → 实时预览 → 环境变量或明文 → 导入），
-// 但**解析在 Python 侧**（复用 api_config_dialog.parse_cookie_text 的 7 种格式，不重写第二套）。
+// 但**解析在 Python 侧**（复用 portpanel.ui.image_source.parse_cookie_text 的 7 种格式，不重写第二套）。
 // 明文边界：界面只显示 describe（名字 + 长度），**不回显 cookie 值**。
 const props = defineProps<{ bridge: PilotBridge; baseUrl: string; current?: string }>()
 const emit = defineEmits<{

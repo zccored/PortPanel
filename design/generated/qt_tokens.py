@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # 本文件由 design/tools/gen_tokens.py 生成 —— 不要手工改。
 #
-# 用途：Qt 侧（dark_theme.py）的**候选**常量。
-# ⚠️ 尚未接线：dark_theme.py 与宿主程序（全栈图库管理器）共用，
-#    把它的字面量换成这些常量属于一次真实重构，需要单独评估后再做。
+# 用途：Qt 侧（portpanel/integration/theme.py）的**候选**常量。
+# ⚠️ 尚未接线：把 theme.py 里的字面量换成这些常量属于一次真实重构，
+#    要单独评估并跑一遍界面回归后再做（本仓库的 theme.py 是自有模块）。
 #    当前只保证「同一份 token 能同时产出 Qt 与 Web 两边的值」。
 
 COLORS = {

@@ -27,13 +27,13 @@ export interface PilotBridge {
   echo(n: number): Promise<number>
   report(kind: string, value: number): Promise<void>
   onStateChanged(cb: (s: PilotState) => void): void
-  // ---- A3：Cookie 导入 / 环境变量（Python 侧复用 api_config_dialog 的唯一实现，按需懒加载）----
+  // ---- A3：Cookie 导入 / 环境变量（Python 侧复用 portpanel/ui/image_source.py 的唯一实现，按需懒加载）----
   parseCookie(text: string, baseUrl: string): Promise<CookieParse>
   envStatus(name: string): Promise<EnvStatusResult>
   envApply(name: string, value: string): Promise<EnvApplyResult>
   setxCommand(name: string, value: string): Promise<SetxCommandResult>
   envReload(): Promise<EnvReloadResult>
-  // ---- A3-2：入口导入 / 分享（.apientry.json；契约见 api_config_dialog.APIConfigDialog）----
+  // ---- A3-2：入口导入 / 分享（.apientry.json；契约见 portpanel.ui.image_source.APIConfigDialog）----
   parseEntry(text: string, existingNames: string[]): Promise<EntryParse>
   buildEntry(source: ApiSource | EntryPayload): Promise<EntryBuild>
   writeEntry(payload: unknown, filename: string): Promise<EntryWriteResult>
@@ -144,7 +144,7 @@ function mockBridge(): PilotBridge {
       ok: true, cmd: `setx ${name} "${value}"`, too_long: false,
     }),
     envReload: async () => ({ ok: true, updated: [], text: '（mock）没有注册表可读' }),
-    // A3-2 的 mock：够调 UI 的近似（真契约在 api_config_dialog.APIConfigDialog）
+    // A3-2 的 mock：够调 UI 的近似（真契约在 portpanel.ui.image_source.APIConfigDialog）
     parseEntry: async (text, existingNames) => {
       let data: any = null
       try {

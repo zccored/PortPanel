@@ -19,7 +19,7 @@
 现在它被拆出来，可以：
 
 - **单独运行**（源码 `python port_panel.py`，或直接用打包版 `端口画板.exe`）；
-- **仍然能被主程序打开**（两边是同一套代码，不存在"两处各异"）；
+- **仍然能被主程序打开**（同源的两个副本，各自演进 —— 宿主读的是它自己那一份，两边会各自漂移）；
 - **被「图库检索管理器 image-search」一键切换拉起**。
 
 它的核心是一张**画板**：左边从「API 入口」里拖一个接口到画布上，右边挂容器框、数据处理框、
@@ -137,7 +137,7 @@ python port_panel.py
 
 ### 五、图源配置
 
-独立窗口，也可以从主程序的「API 和云服务配置」里进去（同一套代码）：
+独立窗口，也可以从主程序的「API 和云服务配置」里进去（同源的两个副本，各自演进）：
 
 - **API 入口**（一个站点）→ **子端口**（一条路径）→ **参数**（名 / 类型 / 值 / **注释**）；
 - 请求头：自定义、`${ENV:VAR}` 环境变量占位符、实时时间头、Cookie 导入与验证、批量粘贴；
@@ -173,16 +173,19 @@ python port_panel.py
 
 ```
 PortPanel/
-├─ port_panel.py            # 独立启动入口（打包也是它）
-├─ img_server.py            # 画板主体（节点、执行引擎、下载器、悬停提示、仪表盘…）
-├─ api_config_dialog.py     # 图源配置 / 请求头 / Cookie / 调试
-├─ dark_theme.py            # 黑夜模式主题（与主程序共用的唯一一份）
-├─ logger_manager.py        # 日志
-├─ secure_store.py          # 明文仅内存的密文缓存
-├─ ui_prefs.py              # 本机 UI 偏好（悬停详情总闸；运行期落 data/ui_prefs.json，不入库）
-├─ aliyun_client.py         # 本地同步服务（api_config_dialog 依赖）
+├─ port_panel.py            # 独立启动入口（打包也是它；只建 QApplication + 开画板）
+├─ portpanel/               # 程序本体（2026-10-11 起按职责分层）
+│   ├─ core/                # 无 Qt 依赖：项目根判定（paths）；配置模型 / 参数解析后续迁入
+│   ├─ engine/              # 执行循环 / 下载 / 落盘 / 清单 / 会话日志（方法级外迁进行中）
+│   ├─ ui/                  # flow_editor（画板主体：节点、悬停提示、仪表盘…）、
+│   │                       # image_source（图源配置）、tour_*（引导）
+│   └─ integration/         # theme（深色配色，本仓库自有）、ui_prefs（本机 UI 偏好）、
+│                           # logger / secure_store / aliyun_client
 ├─ port_panel.spec          # PyInstaller 打包配置
 ├─ requirements.txt
+├─ design/                  # 设计 token / 图标单一来源（生成到 webui 与 Qt 侧常量）
+├─ webui/                   # Web 前端（Vue 3 + TS + Vite；阶段 0 试点）
+├─ tools/                   # 性能探针（本机量测用）
 └─ data/
     ├─ node_svg/            # 悬停提示框的 SVG 模板（9 个，纯 UI 模板）
     └─ fonts/               # 渲染用字体
