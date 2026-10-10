@@ -43,6 +43,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from portpanel.integration.aliyun_client import get_local_sync_server, start_local_sync_server
+from portpanel.core.paths import project_root
 
 # 尝试导入阿里云客户端
 try:
@@ -2299,7 +2300,7 @@ class APIConfigDialog(QDialog):
         self.setWindowTitle("API 和云服务配置")
         self.setMinimumSize(800, 650)
         
-        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "./data/api_config.json")
+        self.config_file = os.path.join(project_root(), "data", "api_config.json")
         self.config = self.load_config()
         
         # 图源配置相关状态

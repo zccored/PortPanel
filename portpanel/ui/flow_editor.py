@@ -29,6 +29,8 @@ from PySide6.QtGui import (
     QWheelEvent, QKeyEvent, QTextCursor, QPixmap, QPalette, QCursor
 )
 
+from portpanel.core.paths import project_root
+
 from portpanel.ui.image_source import (APIConfigDialog, ImageSourceConfigDialog,
                                build_browser_headers,
                                resolve_env_in_headers, resolve_header_placeholders,
@@ -69,6 +71,11 @@ def _project_root():
     PyInstaller 打包后是 `<app>/_internal/portpanel/ui/x.py`（3 层但根是 _internal），
     两种布局的根都能靠"谁下面有 data/"认出来，比数层数稳。
     """
+    from portpanel.core.paths import project_root
+    return project_root()
+
+
+def _project_root_legacy():
     d = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
         if os.path.isdir(os.path.join(d, 'data')):

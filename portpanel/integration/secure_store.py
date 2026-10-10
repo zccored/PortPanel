@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import datetime
 import threading
+from portpanel.core.paths import project_root
 
 try:
     from cryptography.fernet import Fernet
@@ -31,7 +32,7 @@ except ImportError:  # pragma: no cover
     HAS_CRYPTOGRAPHY = False
     Fernet = None
 
-_BASE = os.path.dirname(os.path.abspath(__file__))
+_BASE = project_root()
 _SESSION_FILE = os.path.join(_BASE, 'data', 'secure_session.json')
 _MAGIC = b'SEC2'           # 密文容器魔数
 _PBKDF2_ITER = 200_000
