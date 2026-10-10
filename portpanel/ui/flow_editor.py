@@ -9859,7 +9859,7 @@ class FlowEditorDialog(QDialog):
         # 关掉时连该视图的 200 ms 轮询一起停（见 NodeView.set_hover_enabled）。
         self._hover_enabled = True
         try:
-            import ui_prefs
+            from portpanel.integration import ui_prefs
             self._hover_enabled = bool(ui_prefs.get('hover_detail', True))
         except Exception:
             pass
@@ -10051,7 +10051,7 @@ class FlowEditorDialog(QDialog):
         self._apply_hover_enabled()
         self._refresh_hover_tip_btn()
         try:
-            import ui_prefs
+            from portpanel.integration import ui_prefs
             ui_prefs.set('hover_detail', bool(on))
         except Exception:
             pass

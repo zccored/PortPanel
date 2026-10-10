@@ -193,7 +193,7 @@ def try_load_real_state():
     if not os.path.exists(cfg):
         return None, '（未找到 data/api_config.json → 使用伪造样本）'
     try:
-        import secure_store  # 延迟导入：只在真要看真实配置时才拉起
+        from portpanel.integration import secure_store  # 延迟导入：只在真要看真实配置时才拉起
         raw = secure_store.get_plaintext(cfg)
         if isinstance(raw, (bytes, bytearray)):
             raw = bytes(raw).decode('utf-8', 'replace')
@@ -256,13 +256,13 @@ _JOBS: dict = {}
 
 
 def _api():
-    """懒加载并返回 api_config_dialog 模块（只 import，不建任何窗口、不碰配置）。"""
+    """懒加载并返回 image_source 模块（只 import，不建任何窗口、不碰配置）。"""
     global _api_mod, _api_import_ms
     if _api_mod is None:
         t0 = time.perf_counter()
-        import api_config_dialog as m          # noqa: PLC0415 —— 故意延迟导入
+        from portpanel.ui import image_source as m          # noqa: PLC0415 —— 故意延迟导入
         _api_import_ms = (time.perf_counter() - t0) * 1000.0
-        print('[py] api_config_dialog 懒加载：%.0f ms' % _api_import_ms)
+        print('[py] image_source 懒加载：%.0f ms' % _api_import_ms)
         sys.stdout.flush()
         _api_mod = m
     return _api_mod
@@ -609,7 +609,7 @@ class Bridge(QObject):
             cfg = os.path.join(ROOT, 'data', 'api_config.json')
             if not os.path.exists(cfg):
                 return None
-            import secure_store                        # 延迟导入：只在真要读配置时拉起
+            from portpanel.integration import secure_store  # 延迟导入：只在真要读配置时拉起
             raw = secure_store.get_plaintext(cfg)
             if isinstance(raw, (bytes, bytearray)):
                 raw = bytes(raw).decode('utf-8', 'replace')
