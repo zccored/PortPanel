@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { ApiSource } from '../types'
-import Icon from './Icon.vue'
+import { EmptyState, Icon, Panel, Tag } from './ui'
 
 const props = defineProps<{ sources: ApiSource[]; currentId: string; keyword: string }>()
 const emit = defineEmits<{
@@ -28,13 +28,15 @@ function onInput(ev: Event) {
 </script>
 
 <template>
-  <div class="sources">
-    <div class="head">
-      <input class="input" :value="keyword" placeholder="搜索入口 / 路径…" @input="onInput" />
+  <Panel class="sources">
+    <template #head>
+      <input class="input src-search" :value="keyword" placeholder="搜索入口 / 路径…" @input="onInput" />
+    </template>
+    <template #actions>
       <button class="btn btn--ghost" title="新建入口" @click="emit('add')">
         <Icon name="plus" title="新建入口" />
       </button>
-    </div>
+    </template>
 
     <ul class="list">
       <li
@@ -49,22 +51,22 @@ function onInput(ev: Event) {
           <span class="item__url muted">{{ s.base_url }}</span>
         </div>
         <div class="item__side">
-          <span class="tag">{{ s.endpoints.length }}</span>
+          <Tag>{{ s.endpoints.length }}</Tag>
           <button class="x" title="删除该入口" @click.stop="emit('remove', s.id)">
             <Icon name="close" title="删除该入口" />
           </button>
         </div>
       </li>
-      <li v-if="!filtered.length" class="empty muted">没有匹配的入口</li>
     </ul>
-  </div>
+
+    <EmptyState v-if="!filtered.length" icon="folder" text="没有匹配的入口" hint="换个关键词，或点右上 ＋ 新建" />
+  </Panel>
 </template>
 
 <style scoped>
-.sources { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.head { display: flex; gap: var(--sp-2); padding: var(--sp-3); border-bottom: 1px solid var(--line-soft); }
-.head .input { flex: 1; }
-.list { list-style: none; margin: 0; padding: var(--sp-2); overflow: auto; flex: 1; min-height: 0; }
+.sources { height: 100%; }
+.src-search { flex: 1; }
+.list { list-style: none; margin: 0; padding: var(--sp-2); }
 .item {
   display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3); border-radius: var(--r-2); cursor: pointer;
@@ -78,5 +80,4 @@ function onInput(ev: Event) {
 .item__side { display: flex; align-items: center; gap: var(--sp-2); }
 .x { background: none; border: none; color: var(--fg-2); cursor: pointer; font-size: var(--fs-4); line-height: 1; }
 .x:hover { color: var(--danger); }
-.empty { padding: var(--sp-4); text-align: center; font-size: var(--fs-2); }
 </style>

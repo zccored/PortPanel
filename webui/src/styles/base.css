@@ -68,6 +68,7 @@ body {
 .tag--accent { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
 .tag--warn { color: var(--warn); border-color: var(--warn); }
 .tag--ok { color: var(--ok); border-color: var(--ok); }
+.tag--danger { color: var(--danger); border-color: var(--danger); }
 
 /* 图标（SVG sprite / 内联）统一尺寸与配色，别再用 emoji 当图标 */
 .icon {
