@@ -14,14 +14,13 @@
 #     可增量替换、也方便 image-search 的「切换启动」按路径找到 exe。
 #   * **排除用不到的 Qt 模块**：PySide6 装了几十个模块，端口画板只用到
 #     Core/Gui/Widgets/Svg/SvgWidgets/Network 这几个；不排的话包会大三四百 MB。
-#   * `data/` 一起打进去：`data/node_svg/*.svg` 是悬停提示框的模板（缺了就只剩空白框），
-#     `data/webtree/*.wbt` 是随包送的样板图纸，方便新用户直接打开看效果。
+#   * `data/` 一起打进去：`data/node_svg/*.svg` 是悬停提示框的模板（缺了就只剩空白框）。
 # ---------------------------------------------------------------------------
 import os
 
 ROOT = os.path.dirname(os.path.abspath(SPEC))
 
-# ---- 只打**纯资源**：SVG 模板 + 字体 ----
+# ---- 只打**纯资源**：SVG 模板 ----
 #
 # ⚠ 明确**不打包任何用户数据**。「图纸 / API 入口内容 / 敏感信息一律不分发」是硬要求：
 #
@@ -30,14 +29,16 @@ ROOT = os.path.dirname(os.path.abspath(SPEC))
 #   · data/api_config.json   真实图源配置（加密），本来就不能带；
 #   · data/manifest/         下载清单 —— 含**用户本机的存储路径、内容标题、文件哈希**；
 #   · data/webAPI/           抓取到的名录等（本项目里那份是 8 万多行创作者表）；
-#   · data/fonts/…           字体是程序渲染要用的资源，属于"纯资源"，保留。
+#   · data/fonts/…           ⚠ 2026-10-22 起**不再随包**：DIN1451 那只商业字体
+#                            name 表里没有版权/许可字段，无再分发授权，且本仓库代码零引用。
+#                            它只留在宿主本机的 data/fonts 里。
 #
 # 曾经踩过的坑：这里原来有一个 `for _extra in ('webAPI', 'manifest')` 的循环，
 # 于是**第一次发布的压缩包里真的带上了用户的下载记录与 4.1 MB 创作者名录**。
 # 教训：打包清单要**白名单**（只列必须的），不要**黑名单**（排除已知敏感的）——
 # 因为 data/ 下面随时会长出新的用户数据目录。下面的写法就是白名单。
 datas = []
-for _sub in ('node_svg', 'fonts'):
+for _sub in ('node_svg',):
     _p = os.path.join(ROOT, 'data', _sub)
     if os.path.isdir(_p):
         datas.append((_p, os.path.join('data', _sub)))
@@ -50,7 +51,8 @@ for _sub in ('node_svg', 'fonts'):
 # 原因：白名单里只要混进一个 `data/webtree` 的子目录、或有人往 datas 里塞单个文件，
 # 旧写法就看不见 —— 而这几类恰好都**只该留在使用者本机**。
 _FORBIDDEN_NAMES = ('webtree', 'manifest', 'webapi', 'api_config.json',
-                    'secure_session.json', 'ui_state.json', 'ui_prefs.json')
+                    'secure_session.json', 'ui_state.json', 'ui_prefs.json',
+                    'fonts')          # 2026-10-22：DIN1451 商业字体无再分发授权
 _FORBIDDEN_SUFFIXES = ('.wbt', '.apientry.json', '.plain.backup',
                        '.pem', '.key', '.p12', '.pfx')
 

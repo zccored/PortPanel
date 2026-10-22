@@ -88,3 +88,8 @@ portpanel/integration/data/
 *.pfx
 *.key
 cookies.txt
+
+# ---- 随包字体：**不随仓库分发** ----
+# data/fonts/DIN1451-36breit-1.ttf 是商业字体（name 表无版权/许可字段），
+# 无再分发授权，且本仓库代码零引用 —— 只留在宿主本机。
+**/data/fonts/

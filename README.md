@@ -187,8 +187,7 @@ PortPanel/
 ├─ webui/                   # Web 前端（Vue 3 + TS + Vite；阶段 0 试点）
 ├─ tools/                   # 性能探针（本机量测用）
 └─ data/
-    ├─ node_svg/            # 悬停提示框的 SVG 模板（9 个，纯 UI 模板）
-    └─ fonts/               # 渲染用字体
+    └─ node_svg/            # 悬停提示框的 SVG 模板（9 个，纯 UI 模板）
 ```
 
 > **这个仓库里没有图纸、没有 API 入口内容、没有任何凭据。** 这是刻意的：
@@ -209,7 +208,7 @@ python -m PyInstaller --noconfirm --clean port_panel.spec
 - **onedir 而不是 onefile**：onefile 每次启动都要解压 ~200MB，首启 10 秒起；onedir 秒开，
   也方便 image-search 按路径找到 exe；
 - **排除用不到的 Qt 模块**（WebEngine / Quick / 3D / Multimedia…），不排的话包会大三四百 MB；
-- **打包清单是白名单**：只列 `data/node_svg` 与 `data/fonts` 两个纯资源目录。
+- **打包清单是白名单**：只列 `data/node_svg` 这一个纯资源目录。
   文件里还有一道**兜底闸门** —— 一旦 `datas` 里出现 `webtree` / `manifest` / `webAPI` /
   `api_config.json`，构建会**直接报错退出**，而不是把用户数据悄悄打进发布包。
   （这道闸门是补出来的：第一版用的是"排除已知敏感目录"的黑名单写法，
