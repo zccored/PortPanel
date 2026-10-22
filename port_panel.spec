@@ -44,14 +44,44 @@ for _sub in ('node_svg', 'fonts'):
 
 # 兜底闸门：万一以后有人往上面的白名单里加了用户数据目录，这里直接把构建**挡下来**，
 # 而不是等它悄悄进了发布包才发现。
-_FORBIDDEN = ('webtree', 'manifest', 'webapi', 'api_config.json')
-_bad = [d for d in datas
-        if any(f in os.path.basename(str(d[0])).lower() for f in _FORBIDDEN)]
+#
+# 2026-10-22 加固：不再只看 datas 的**目录名** —— 递归扫一遍要打进包的每个文件，
+# 图纸(.wbt) / 分享入口(.apientry.json) / 明文备份 / 私钥 一律挡下。
+# 原因：白名单里只要混进一个 `data/webtree` 的子目录、或有人往 datas 里塞单个文件，
+# 旧写法就看不见 —— 而这几类恰好都**只该留在使用者本机**。
+_FORBIDDEN_NAMES = ('webtree', 'manifest', 'webapi', 'api_config.json',
+                    'secure_session.json', 'ui_state.json', 'ui_prefs.json')
+_FORBIDDEN_SUFFIXES = ('.wbt', '.apientry.json', '.plain.backup',
+                       '.pem', '.key', '.p12', '.pfx')
+
+
+def _offending_paths(_datas):
+    """列出 datas 里**不该分发**的文件（按文件名 / 目录名 / 后缀判定）。"""
+    _hits = []
+    for _src in _datas:
+        _src = str(_src[0])
+        if os.path.isfile(_src):
+            _files = [_src]
+        else:
+            _files = [os.path.join(_r, _n)
+                      for _r, _ds, _ns in os.walk(_src) for _n in _ns]
+        for _f in _files:
+            _low = _f.replace('\\', '/').lower()
+            _base = os.path.basename(_low)
+            if any(_base == _n or ('/' + _n + '/') in _low for _n in _FORBIDDEN_NAMES):
+                _hits.append(_f)
+            elif _low.endswith(_FORBIDDEN_SUFFIXES):
+                _hits.append(_f)
+    return _hits
+
+
+_bad = _offending_paths(datas)
 if _bad:
     raise SystemExit(
-        "\n❌ 打包被拒绝：datas 里出现了用户数据目录 %r\n"
-        "   图纸 / API 入口内容 / 敏感信息一律不分发，请把它们从 datas 里拿掉。\n"
-        % ([str(d[0]) for d in _bad],))
+        "\n❌ 打包被拒绝：datas 里出现了不该分发的文件 %r\n"
+        "   图纸(.wbt) / 分享入口(.apientry.json) / 明文备份 / 私钥 一律只留使用者本机，\n"
+        "   请把它们从 datas 里拿掉（打包清单必须是白名单）。\n"
+        % (_bad,))
 
 hiddenimports = [
     # Qt 侧：SVG 渲染是悬停提示框的命脉，PyInstaller 不会自动追
