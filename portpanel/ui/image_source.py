@@ -1396,7 +1396,14 @@ class EndpointEditDialog(QDialog):
 
         # 参数区域标题
         param_header = QHBoxLayout()
-        param_header.addWidget(QLabel("📌 路径参数 (自动检测花括号):"))
+        param_header.addWidget(QLabel("📌 参数 (路径里的花括号自动检测):"))
+        self.add_param_btn = QPushButton("+ 添加参数")
+        self.add_param_btn.setMaximumWidth(110)
+        self.add_param_btn.setToolTip(
+            "手动加一条参数（默认放 query）。\n"
+            "「位置」列可改成 header / body —— 画板执行时会按位置落点发送。")
+        self.add_param_btn.clicked.connect(self._add_manual_param)
+        param_header.addWidget(self.add_param_btn)
         param_header.addStretch()
         self.param_count_label = QLabel("未检测到参数")
         self.param_count_label.setStyleSheet("color: #888; font-size: 11px;")
@@ -1404,18 +1411,21 @@ class EndpointEditDialog(QDialog):
         layout.addLayout(param_header)
 
         # 参数表格
-        # 注意：列数必须是 5 —— _sync_param_table 会把删除按钮放在第 4 列，
-        # 历史上这里写的是 4 列，导致 setCellWidget(row, 4, ...) 越界、删除按钮从未显示。
-        self.param_table = QTableWidget(0, 5)
-        self.param_table.setHorizontalHeaderLabels(["参数名", "数据类型", "参数值", "注释", ""])
+        # 6 列：参数名 / 数据类型 / 参数值 / 位置 / 注释 / 删除
+        # 「位置」是 P1a 的落点（path/query/header/body）—— 以前只认 path 字符串替换。
+        self.param_table = QTableWidget(0, 6)
+        self.param_table.setHorizontalHeaderLabels(
+            ["参数名", "数据类型", "参数值", "位置", "注释", ""])
         self.param_table.horizontalHeader().setStretchLastSection(False)
         self.param_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.param_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self.param_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.param_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.param_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Fixed)
-        self.param_table.setColumnWidth(1, 130)
-        self.param_table.setColumnWidth(4, 30)
+        self.param_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self.param_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.param_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)
+        self.param_table.setColumnWidth(1, 120)
+        self.param_table.setColumnWidth(3, 118)
+        self.param_table.setColumnWidth(5, 30)
         self.param_table.setMinimumHeight(80)
         self.param_table.verticalHeader().setVisible(False)
         self.param_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -1513,6 +1523,22 @@ class EndpointEditDialog(QDialog):
         body_header.addWidget(self.body_hint_label)
         layout.addLayout(body_header)
 
+        body_kind_row = QHBoxLayout()
+        body_kind_row.addWidget(QLabel("请求体类型:"))
+        self.body_kind_combo = QComboBox()
+        for _label, _key in (("无 none", "none"), ("JSON", "json"),
+                             ("表单 form", "form"), ("原始 raw", "raw")):
+            self.body_kind_combo.addItem(_label, _key)
+        self.body_kind_combo.setMaximumWidth(140)
+        self.body_kind_combo.setToolTip(
+            "画板执行时按这个类型编码请求体。\n"
+            "JSON → application/json；form → x-www-form-urlencoded；raw → 原样字节。")
+        self.body_kind_combo.currentIndexChanged.connect(
+            lambda _i: self._refresh_body_hint())
+        body_kind_row.addWidget(self.body_kind_combo)
+        body_kind_row.addStretch()
+        layout.addLayout(body_kind_row)
+
         self.body_edit = QPlainTextEdit()
         self.body_edit.setPlaceholderText(
             '留空则不带请求体。支持 JSON（如 {"a": 1}）或普通文本/表单串（如 a=1&b=2）。'
@@ -1553,69 +1579,139 @@ class EndpointEditDialog(QDialog):
                 seen.add(p)
                 unique_params.append(p)
 
-        # 更新参数表格
+        # 更新参数表格（保留非 path 落点的手动 / 导入参数）
         self._sync_param_table(unique_params)
-        self.param_count_label.setText(
-            f"检测到 {len(unique_params)} 个参数" if unique_params else "未检测到参数"
-        )
+        total = self.param_table.rowCount()
+        if total:
+            self.param_count_label.setText(
+                f"共 {total} 个参数（路径占位 {len(unique_params)}）")
+        else:
+            self.param_count_label.setText("未检测到参数")
 
     def _sync_param_table(self, param_names):
-        existing_values = {}
-        existing_types = {}
-        existing_notes = {}
+        """按路径占位符重建 path 行；**保留**非 path 落点的行（query/header/body）。
+
+        以前这里只认路径里的 `{name}`，手动加 / 导入的 query、body 参数一改路径就被清空。
+        """
+        rows = []
         for row in range(self.param_table.rowCount()):
             name_item = self.param_table.item(row, 0)
-            if name_item:
-                name = name_item.text()
-                existing_values[name] = self._get_param_value(row)
-                existing_types[name] = self._get_param_type(row)
-                existing_notes[name] = self._get_param_note(row)  # 新增
+            if not name_item or not name_item.text():
+                continue
+            rows.append({
+                'name': name_item.text(),
+                'type': self._get_param_type(row),
+                'value': self._get_param_value(row),
+                'location': self._get_param_location(row),
+                'note': self._get_param_note(row),
+            })
+        by_name = {r['name']: r for r in rows}
+        extras = [r for r in rows
+                  if r['location'] != 'path' and r['name'] not in param_names]
 
         self.param_table.setRowCount(0)
-
         for pname in param_names:
-            row = self.param_table.rowCount()
-            self.param_table.insertRow(row)
+            prev = by_name.get(pname, {})
+            self._append_param_row(
+                pname, type_=prev.get('type', 'string'),
+                value=prev.get('value', ''),
+                location=prev.get('location', 'path'),
+                note=prev.get('note', ''))
+        for r in extras:
+            self._append_param_row(r['name'], type_=r['type'], value=r['value'],
+                                   location=r['location'], note=r['note'])
 
-            # 参数名
-            name_item = QTableWidgetItem(pname)
+    def _append_param_row(self, name, type_='string', value='', location='path',
+                          note='', editable_name=False):
+        """追加一行参数（位置列是 P1a 的落点）。"""
+        row = self.param_table.rowCount()
+        self.param_table.insertRow(row)
+
+        name_item = QTableWidgetItem(name)
+        if not editable_name:
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)
-            name_item.setFont(QFont("Consolas", 10))
-            self.param_table.setItem(row, 0, name_item)
+        name_item.setFont(QFont("Consolas", 10))
+        self.param_table.setItem(row, 0, name_item)
 
-            # 类型下拉框
-            type_combo = QComboBox()
-            type_combo.addItems(["string", "path", "int", "float", "bool"])
-            type_combo.setCurrentText(existing_types.get(pname, "string"))
-            self.param_table.setCellWidget(row, 1, type_combo)
+        type_combo = QComboBox()
+        type_combo.addItems(["string", "path", "int", "float", "bool"])
+        type_combo.setCurrentText(type_ or "string")
+        self.param_table.setCellWidget(row, 1, type_combo)
 
-            # 值输入框
-            value_edit = QLineEdit()
-            value_edit.setPlaceholderText(f"输入 {pname} 的值...")
-            if pname in existing_values:
-                value_edit.setText(existing_values[pname])
-            self.param_table.setCellWidget(row, 2, value_edit)
+        value_edit = QLineEdit()
+        value_edit.setPlaceholderText(f"输入 {name} 的值..." if name else "参数值...")
+        value_edit.setText(value or '')
+        self.param_table.setCellWidget(row, 2, value_edit)
 
-            # 注释输入框
-            note_edit = QLineEdit()
-            note_edit.setPlaceholderText("参数注释...")
-            if pname in existing_notes:
-                note_edit.setText(existing_notes[pname])
-            self.param_table.setCellWidget(row, 3, note_edit)
+        loc_combo = QComboBox()
+        for label, key in (("路径 path", "path"), ("查询 query", "query"),
+                           ("请求头 header", "header"), ("请求体 body", "body")):
+            loc_combo.addItem(label, key)
+        idx = loc_combo.findData(location or 'path')
+        loc_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.param_table.setCellWidget(row, 3, loc_combo)
 
-            # 删除按钮（列索引改为4）
-            del_btn = QPushButton("×")
-            del_btn.setMaximumWidth(30)
-            del_btn.setStyleSheet("color: #d9534f; font-weight: bold; border: none;")
-            del_btn.setToolTip("移除此参数（将从路径中删除）")
-            del_btn.clicked.connect(lambda checked, p=pname: self._remove_param(p))
-            self.param_table.setCellWidget(row, 4, del_btn)
+        note_edit = QLineEdit()
+        note_edit.setPlaceholderText("参数注释...")
+        note_edit.setText(note or '')
+        self.param_table.setCellWidget(row, 4, note_edit)
+
+        del_btn = QPushButton("×")
+        del_btn.setMaximumWidth(30)
+        del_btn.setStyleSheet("color: #d9534f; font-weight: bold; border: none;")
+        del_btn.setToolTip("移除这一行（path 落点会同时从路径里删掉）")
+        del_btn.clicked.connect(lambda checked=False, n=name: self._remove_param_row(n))
+        self.param_table.setCellWidget(row, 5, del_btn)
+
+    def _ensure_param_rows(self, params):
+        """把「路径模板里没有」的参数补成表格行（导入的 query/body 参数）。"""
+        have = set()
+        for r in range(self.param_table.rowCount()):
+            it = self.param_table.item(r, 0)
+            if it is not None and it.text():
+                have.add(it.text())
+        for p in params or ():
+            name = (p.get('name') or '').strip()
+            if not name or name in have:
+                continue
+            self._append_param_row(
+                name, type_=p.get('type', 'string'), value=p.get('value', ''),
+                location=p.get('location', 'path'), note=p.get('note', ''))
+            have.add(name)
+        if self.param_table.rowCount():
+            self.param_count_label.setText(f"共 {self.param_table.rowCount()} 个参数")
+
+    def _add_manual_param(self):
+        self._append_param_row('', value='', location='query', note='',
+                               editable_name=True)
+        item = self.param_table.item(self.param_table.rowCount() - 1, 0)
+        if item is not None:
+            self.param_table.editItem(item)
+
+    def _remove_param_row(self, name):
+        """path 落点 → 从路径里删占位符；其它落点 → 只删表格行。"""
+        cur = self.path_edit.text()
+        if name and re.search(r'\{' + re.escape(name) + r'\}', cur):
+            self._remove_param(name)
+            return
+        for r in range(self.param_table.rowCount()):
+            it = self.param_table.item(r, 0)
+            if it is not None and it.text() == name:
+                self.param_table.removeRow(r)
+                break
+        self.param_count_label.setText(f"共 {self.param_table.rowCount()} 个参数")
 
     def _get_param_note(self, row):
-        widget = self.param_table.cellWidget(row, 3)
+        widget = self.param_table.cellWidget(row, 4)
         if widget and isinstance(widget, QLineEdit):
             return widget.text()
         return ''
+
+    def _get_param_location(self, row):
+        widget = self.param_table.cellWidget(row, 3)
+        if widget and isinstance(widget, QComboBox):
+            return widget.currentData() or 'path'
+        return 'path'
 
     def _get_param_value(self, row):
         widget = self.param_table.cellWidget(row, 2)
@@ -1926,9 +2022,14 @@ class EndpointEditDialog(QDialog):
                     value_edit = self.param_table.cellWidget(row, 2)
                     if value_edit and isinstance(value_edit, QLineEdit):
                         value_edit.setText(p.get('value', ''))
-                    note_edit = self.param_table.cellWidget(row, 3)
+                    note_edit = self.param_table.cellWidget(row, 4)
                     if note_edit and isinstance(note_edit, QLineEdit):
                         note_edit.setText(p.get('note', ''))
+                    loc_combo = self.param_table.cellWidget(row, 3)
+                    if loc_combo and isinstance(loc_combo, QComboBox):
+                        i = loc_combo.findData(p.get('location', 'path'))
+                        if i >= 0:
+                            loc_combo.setCurrentIndex(i)
                     break
 
         # 恢复请求头
@@ -1939,8 +2040,16 @@ class EndpointEditDialog(QDialog):
         # 恢复请求体
         self.body_edit.setPlainText(data.get('body', '') or '')
 
-        # 触发路径检测
+        # 触发路径检测（会按路径重建 path 行）
         self.on_path_changed(self.path_edit.text())
+        # 非 path 落点（query/header/body）补行：路径模板里没有它们
+        self._ensure_param_rows(params)
+        # 恢复请求体类型
+        if getattr(self, 'body_kind_combo', None) is not None:
+            kind = data.get('body_kind') or (
+                'json' if str(data.get('body', '') or '').strip() else 'none')
+            i = self.body_kind_combo.findData(kind)
+            self.body_kind_combo.setCurrentIndex(i if i >= 0 else 0)
         self._refresh_header_style()
         self._refresh_body_hint()
 
@@ -1948,18 +2057,19 @@ class EndpointEditDialog(QDialog):
         params = []
         for row in range(self.param_table.rowCount()):
             name_item = self.param_table.item(row, 0)
-            if name_item:
-                name = name_item.text()
-                type_combo = self.param_table.cellWidget(row, 1)
-                value_edit = self.param_table.cellWidget(row, 2)
-                note_edit = self.param_table.cellWidget(row, 3)
-                params.append({
-                    'name': name,
-                    'type': type_combo.currentText() if type_combo else 'string',
-                    'value': value_edit.text() if value_edit else '',
-                    'note': note_edit.text() if note_edit else '',
-                    'location': 'path'
-                })
+            name = (name_item.text() if name_item else '').strip()
+            if not name:
+                continue
+            type_combo = self.param_table.cellWidget(row, 1)
+            value_edit = self.param_table.cellWidget(row, 2)
+            note_edit = self.param_table.cellWidget(row, 4)
+            params.append({
+                'name': name,
+                'type': type_combo.currentText() if type_combo else 'string',
+                'value': value_edit.text() if value_edit else '',
+                'note': note_edit.text() if note_edit else '',
+                'location': self._get_param_location(row),
+            })
 
         headers = self._collect_headers()
 
@@ -1971,6 +2081,8 @@ class EndpointEditDialog(QDialog):
             'parameters': params,
             'headers': headers,
             'body': self.body_edit.toPlainText(),
+            'body_kind': (self.body_kind_combo.currentData()
+                          if getattr(self, 'body_kind_combo', None) is not None else 'none'),
             'last_response': ''
         }
 
@@ -2846,14 +2958,16 @@ class APIConfigDialog(QDialog):
         param_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
         detail_layout.addWidget(param_label)
 
-        self._ep_param_table = QTableWidget(0, 4)
-        self._ep_param_table.setHorizontalHeaderLabels(["参数名", "类型", "值", "注释"])
+        self._ep_param_table = QTableWidget(0, 5)
+        self._ep_param_table.setHorizontalHeaderLabels(["参数名", "类型", "值", "位置", "注释"])
         self._ep_param_table.horizontalHeader().setStretchLastSection(True)
         self._ep_param_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self._ep_param_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
         self._ep_param_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self._ep_param_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._ep_param_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Fixed)
+        self._ep_param_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self._ep_param_table.setColumnWidth(1, 100)
+        self._ep_param_table.setColumnWidth(3, 90)
         self._ep_param_table.setMinimumHeight(60)
         self._ep_param_table.setMaximumHeight(200)
         self._ep_param_table.verticalHeader().setVisible(False)
@@ -3106,8 +3220,13 @@ class APIConfigDialog(QDialog):
             # 值
             detail['param_table'].setItem(r, 2, QTableWidgetItem(p.get('value', '')))
 
+            # 位置（P1a：path/query/header/body，只读展示）
+            loc_item = QTableWidgetItem(p.get('location', 'path') or 'path')
+            loc_item.setFlags(loc_item.flags() & ~Qt.ItemIsEditable)
+            detail['param_table'].setItem(r, 3, loc_item)
+
             # 注释
-            detail['param_table'].setItem(r, 3, QTableWidgetItem(p.get('note', '')))
+            detail['param_table'].setItem(r, 4, QTableWidgetItem(p.get('note', '')))
 
         # 请求头摘要（敏感值打码，只显示键与长度）
         headers = ep.get('headers', {}) or {}
@@ -3576,13 +3695,14 @@ class APIConfigDialog(QDialog):
                 name = name_item.text()
                 type_combo = param_table.cellWidget(row, 1)
                 value_item = param_table.item(row, 2)
-                note_item = param_table.item(row, 3)
+                loc_item = param_table.item(row, 3)
+                note_item = param_table.item(row, 4)
                 params.append({
                     'name': name,
                     'type': type_combo.currentText() if type_combo else 'string',
                     'value': value_item.text() if value_item else '',
                     'note': note_item.text() if note_item else '',
-                    'location': 'path'
+                    'location': (loc_item.text() if loc_item and loc_item.text() else 'path'),
                 })
         endpoints[ep_idx]['parameters'] = params
 

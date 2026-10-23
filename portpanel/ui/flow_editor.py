@@ -328,6 +328,15 @@ def _make_robust_request(method, url, timeout=DOWNLOAD_TIMEOUT, max_retries=2, *
     headers.setdefault('DNT', '1')
     headers.setdefault('Connection', 'keep-alive')
 
+    # ---- 出口代理：本机走 127.0.0.1:7890，直连会 TLS 被拦 / 超时 ----
+    try:
+        from portpanel.core.net import proxies_for
+        _px = proxies_for(url)
+        if _px:
+            kwargs.setdefault('proxies', _px)
+    except Exception:
+        _px = None
+
     # ---- 第一轮：标准 requests ----
     try:
         resp = requests.request(method, url, headers=headers, timeout=timeout, **kwargs)
@@ -1620,13 +1629,17 @@ class DownloadWorker(QThread):
         self.timeout = t
 
         def _req_requests(method, url, hdrs, timeout):
+            from portpanel.core.net import proxies_for
             return requests.request(method, url, headers=hdrs,
-                                    timeout=timeout, stream=True)
+                                    timeout=timeout, stream=True,
+                                    proxies=proxies_for(url))
 
         def _req_curl(method, url, hdrs, timeout):
+            from portpanel.core.net import proxies_for
             return curl_requests.request(
                 method, url, headers=hdrs, timeout=timeout,
-                stream=True, impersonate="chrome124")
+                stream=True, impersonate="chrome124",
+                proxies=proxies_for(url))
 
         # ---- 探测：获取 Content-Type / Content-Length / Accept-Ranges ----
         probe = None
@@ -6166,6 +6179,24 @@ class APINodeHeadersDialog(QDialog):
         return headers
 
 
+def infer_body_kind(body: str, headers: dict) -> str:
+    """端点没声明 body_kind 时按 Content-Type 推断；没有 body 就是 none。"""
+    if not str(body or '').strip():
+        return 'none'
+    ct = ''
+    for k, v in (headers or {}).items():
+        if str(k).lower() == 'content-type':
+            ct = str(v).lower()
+            break
+    if 'json' in ct:
+        return 'json'
+    if 'x-www-form-urlencoded' in ct:
+        return 'form'
+    if ct:
+        return 'raw'
+    return 'json'
+
+
 class APINode(QGraphicsRectItem):
     def __init__(self, api_data=None):
         super().__init__()
@@ -6180,6 +6211,9 @@ class APINode(QGraphicsRectItem):
         self.url_path = "/"
         self.params = []
         self.headers = {}
+        # 请求体（P1a）：配置页的端点本来就有 body，画板以前完全没用它
+        self.body = ""
+        self.body_kind = "none"      # none / json / form / raw（multipart 见 P1c）
         self.result_json = None
         self.next_nodes = []
         self.param_widgets = {}
@@ -6263,6 +6297,14 @@ class APINode(QGraphicsRectItem):
         self._refresh_headers_btn()
 
         param_names = parse_curly_params(self.url_path)
+        # 非 path 落点（query / header / body）同样要有输入点：
+        # POST / PUT 的参数就是「推进这个末端节点」的入口，没有端口就没法连线推送。
+        for _p in (self.params or []):
+            _nm = str(_p.get('name') or '')
+            if not _nm or _nm in param_names:
+                continue
+            if str(_p.get('location') or 'path') != 'path':
+                param_names.append(_nm)
         self.param_widgets.clear()
         for name in param_names:
             initial_val = next((p['value'] for p in self.params if p['name'] == name), '')
@@ -6315,6 +6357,23 @@ class APINode(QGraphicsRectItem):
                     layout.addWidget(cw)
                 self._concat_widgets.append(cw)
 
+        # 断点红点：元素框**整体右下角**（不跟请求头按钮挤一起）
+        _dot_row = QHBoxLayout()
+        _dot_row.setContentsMargins(0, 0, 6, 0)
+        _dot_row.addStretch()
+        try:
+            from portpanel.ui.debug.breakpoint import BreakpointDot
+            from portpanel.ui.debug.bridge import get_bridge
+            self.breakpoint_dot = BreakpointDot()
+            self.breakpoint_dot.set_armed(get_bridge().is_armed(self))
+            self.breakpoint_dot.toggled.connect(
+                lambda on, _n=self: (get_bridge().set_armed(_n, on),
+                                     self._refresh_breakpoint_btn()))
+            _dot_row.addWidget(self.breakpoint_dot, 0, Qt.AlignRight | Qt.AlignBottom)
+        except Exception:
+            self.breakpoint_dot = None
+        layout.addLayout(_dot_row)
+
         container.setStyleSheet("background: rgba(60,60,60,200); border-radius:4px; color:white;")
         self.proxy = QGraphicsProxyWidget(self)
         self.proxy.setWidget(container)
@@ -6348,6 +6407,18 @@ class APINode(QGraphicsRectItem):
             btn.setToolTip("点击添加自定义请求头（如 Cookie / Authorization）。\n"
                            "留空值 = 不发送该头；值支持 ${ENV:变量名} 占位符。")
 
+    def mouseDoubleClickEvent(self, event):
+        """双击元素框空白处 → 请求断点面板（P2；双击到子控件不会走到这里）。"""
+        if event.button() == Qt.LeftButton:
+            try:
+                from portpanel.ui.debug.panel_host import open_for_node
+                open_for_node(self, event.screenPos())
+                event.accept()
+                return
+            except Exception:
+                pass
+        super().mouseDoubleClickEvent(event)
+
     def _edit_headers(self):
         """打开请求头编辑对话框。只更新按钮，不重建 UI。"""
         view = None
@@ -6376,12 +6447,16 @@ class APINode(QGraphicsRectItem):
         if scene and isinstance(scene, NodeScene):
             scene.update_connections_for_node(self)
 
-    def set_api(self, method, url_path, params=None, headers=None):
+    def set_api(self, method, url_path, params=None, headers=None,
+                body="", body_kind=None):
         self.method = method
         self.url_path = url_path
         self.params = params or []
         if headers is not None:
             self.headers = dict(headers)
+        # P1a：请求体随端点一起带进画板
+        self.body = body or ""
+        self.body_kind = body_kind or infer_body_kind(self.body, self.headers)
         self._build_ui()
 
     def _on_param_changed(self, name, value):
@@ -6494,6 +6569,10 @@ class APINode(QGraphicsRectItem):
         scene_pos = self.proxy.mapToScene(widget_pos)
         return QPointF(self.scenePos().x() + self.rect().left(), scene_pos.y())
 
+    def is_terminal(self):
+        """POST / PUT / PATCH 是终端发信节点：没有输出点，不接下游。"""
+        return str(getattr(self, 'method', 'GET')).upper() in ('POST', 'PUT', 'PATCH')
+
     def outputPort(self):
         return self.mapToScene(self.rect().right(), self.rect().center().y())
 
@@ -6505,8 +6584,9 @@ class APINode(QGraphicsRectItem):
             painter.setPen(QPen(Qt.black, 2))
             painter.setBrush(QColor(70, 130, 180))
         painter.drawRoundedRect(self.rect(), 6, 6)
-        painter.setBrush(QColor(200,100,100))
-        painter.drawEllipse(QPointF(self.rect().right(), self.rect().center().y()), 7, 7)
+        if not self.is_terminal():
+            painter.setBrush(QColor(200,100,100))
+            painter.drawEllipse(QPointF(self.rect().right(), self.rect().center().y()), 7, 7)
         for name in self.param_widgets.keys():
             port = self.param_input_port(name)
             local_port = self.mapFromScene(port)
@@ -7339,7 +7419,8 @@ class NodeScene(QGraphicsScene):
         """
         members = [n for n in nodes if isinstance(
             n, (APINode, DataProcessNode, CsvDataNode, ContainerNode,
-                StepperNode, SiteParserNode, ImageNode))]
+                StepperNode, SiteParserNode, ImageNode))
+            or type(n).__name__ == 'PortNode']
         if not members:
             return None
         # 全部已属于同一个类 → 仅选择，不重复建类
@@ -7578,7 +7659,7 @@ _HOVER_PORT_MAX_ROWS = 7     # 一屏最多列几行，超出折叠成「另有 
 # 现在浮窗点击穿透 + 离开即收（见 NodeHoverTip / NodeView._poll_hover），
 # 长等待失去意义。改动前的实测（本机量测脚本，私有不入库）：
 # 「悬停 → 内容可见」要 4.44 s，其中真·渲染只有 5–31 ms（99.4% 是等待与动效）。
-HOVER_REVEAL_DELAY_S = 0.25
+HOVER_REVEAL_DELAY_S = 4.0
 
 # 模板里用 <!-- HOVER:PORTS top=起点y tail=页脚原始y --> 标出端口区位置
 _HOVER_PORTS_RE = re.compile(
@@ -7618,36 +7699,19 @@ def _hover_grow_canvas(svg, dy):
 
 
 class NodeHoverTip(QWidget):
-    """元素框悬停详情浮窗。
+    """元素框悬停提示浮窗。
 
-    时间线：悬停后显示 thinking 文本框（₍^. .^₎⟆thinking....）并平滑跟随鼠标，
-    满 HOVER_REVEAL_DELAY_S 秒拉开展示框动效并展示 SVG（端口清单 + 当前值）；
-    **展开后仍跟随鼠标**；鼠标离开元素框立即收（Esc 也可退出）。
-
-    两条**改动前必读**的约束：
-
-    - **点击穿透**：本窗口带 `Qt.WindowTransparentForInput` ＋ `WA_TransparentForMouseEvents`，
-      落在它上面的点击 / 拖动会穿透到画布。所以这里**不处理鼠标事件** —— 早期版本
-      「把挡路的浮窗拖走」的能力是**故意去掉的**（穿透之后这个需求本身就不存在了）。
-      要改回可交互，得先想清楚它会重新挡住操作，并配合「按键门控」之类的方案
-      （缓冲带也要一起加回来 —— 本机记忆里记过这条坑）。
-    - **两个动效不要同时跑**：`_anim` 动的是 geometry（含位置），`_move_anim` 动的是 pos ——
-      同时进行会互相覆盖、抖动。所以 `animate_move_to()` 在展开动效未结束时直接返回。
+    时间线：悬停 0~4s 显示 thinking 文本框（₍^. .^₎⟆thinking....）并平滑跟随鼠标
+    （不同元素框间快速切换时平滑滑过），4s 起拉开展示框动效并正式展示 SVG 内容；
+    展示后锁定位置不再跟随鼠标，可按住拖动到任意位置停留。鼠标离开触发节点后，
+    只要仍在本框外扩的不可视碰撞区内就保持不关闭，移出碰撞区才退出；Esc 始终可退出。
     """
+    _GRAB = 26  # 边框外不可视碰撞区（像素）：鼠标停留在此带内不关闭
 
     def __init__(self):
         super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        # 点击穿透：鼠标事件落到下层画布，浮窗不再抢点击 / 拖动（见类注释第 1 条）
-        # 两层都要设，缺一不可：
-        #   · Qt.WindowTransparentForInput → 平台层（Windows 上给窗口加 WS_EX_TRANSPARENT），
-        #     真实点击/拖动会穿到下层窗口 —— 这才是「点得到下面的框」的关键；
-        #   · WA_TransparentForMouseEvents → Qt 自己的命中测试也算它透明。
-        #     ⚠️ 实测：只设前者时 QApplication.topLevelAt() 仍会**返回本浮窗**（Qt 枚举
-        #     自己的顶层窗口、只认这个属性），靠 topLevelAt 判「鼠标在哪个窗口上」的代码
-        #     会把画布误判成「被浮窗挡住」；设上它两者才一致。
-        self.setWindowFlag(Qt.WindowTransparentForInput, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setMouseTracking(True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self._label = QLabel()
@@ -7658,25 +7722,34 @@ class NodeHoverTip(QWidget):
             "border:1px solid #3a6ea5; border-radius:8px; padding:6px 10px; "
             "font-family: Consolas, 'Courier New', monospace; font-size:13px; }")
         self._pixmap = None
-        self._has_svg = False   # 是否已展示 SVG（此时 label 不再用 thinking 文本）
-        self._expanding = False  # 展开动效进行中（期间不跟随，见类注释第 2 条）
-        self._anim = QPropertyAnimation(self, b"geometry", self)  # 展开动效（尺寸）
+        self._is_expanded = False   # 是否已进入展示锁定（不再跟随、可拖动）
+        self._dragging = False
+        self._drag_offset = QPoint()
+        self._anim = QPropertyAnimation(self, b"geometry", self)  # 展开动效
         self._anim.setDuration(420)
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.finished.connect(self._on_expand_done)
-        self._move_anim = QPropertyAnimation(self, b"pos", self)  # 平滑跟随（位置）
+        self._move_anim = QPropertyAnimation(self, b"pos", self)  # thinking 平滑跟随
         self._move_anim.setDuration(180)
         self._move_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.hide()
 
-    # ---------- 平滑跟随 ----------
-    def animate_move_to(self, x, y):
-        """把浮窗平滑移到屏幕 (x, y)（跟随鼠标锚点；已在目标附近则不动）。
+    # ---------- 平滑跟随 / 拖动 / 不可视碰撞区 ----------
+    def contains_global(self, gp):
+        """屏幕坐标 gp 是否落在本浮窗内（含外扩的不可视碰撞区）。
 
-        展开动效（_anim 动的是 geometry，含位置）未结束时直接返回 —— 与这里的 pos
-        动画同时进行会互相覆盖、抖动。等它结束（`_on_expand_done` 清 `_expanding`）恢复跟随。
+        这是「鼠标移进 SVG 框 / 在边框外的 26px 缓冲带里停留不关闭」的**唯一判据**：
+        它只看几何关系，不依赖平台窗口枚举（QApplication.topLevelAt 在部分平台上
+        会返回浮窗的子控件或 null，靠它判断会误判成「鼠标已离开」而立刻关闭）。
         """
-        if self._expanding:
+        try:
+            return self.isVisible() and self.collision_rect().contains(gp)
+        except Exception:
+            return False
+
+    def animate_move_to(self, x, y):
+        """把 thinking 框平滑移到屏幕 (x, y)（跟随鼠标锚点；已在目标附近则不动）。"""
+        if self._is_expanded:
             return
         cur = self.pos()
         if abs(cur.x() - x) < 2 and abs(cur.y() - y) < 2:
@@ -7686,9 +7759,35 @@ class NodeHoverTip(QWidget):
         self._move_anim.setEndValue(QPoint(int(x), int(y)))
         self._move_anim.start()
 
+    def collision_rect(self):
+        """不可视碰撞区：展示框边界外扩 _GRAB 像素（屏幕坐标）。"""
+        return self.geometry().adjusted(-self._GRAB, -self._GRAB,
+                                        self._GRAB, self._GRAB)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._is_expanded:
+            self._dragging = True
+            self._drag_offset = event.globalPos() - self.frameGeometry().topLeft()
+            self._anim.stop()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.move(event.globalPos() - self._drag_offset)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging:
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def _on_expand_done(self):
-        """展开动效结束：把 SVG 塞进 label，并恢复跟随（清 `_expanding`）。"""
-        self._expanding = False
         if getattr(self, '_pixmap', None) is not None and not self._pixmap.isNull():
             self._label.setPixmap(self._pixmap)
             self._label.setAlignment(Qt.AlignCenter)
@@ -7697,8 +7796,8 @@ class NodeHoverTip(QWidget):
         """第一阶段：显示 thinking 文本框（之后平滑跟随鼠标）。"""
         self._anim.stop()
         self._move_anim.stop()
-        self._expanding = False
-        self._has_svg = False
+        self._is_expanded = False
+        self._dragging = False
         self._label.setPixmap(QPixmap())   # 先清空 pixmap，再设文本（二者互斥，后设者生效）
         self._label.setText("₍^. .^₎⟆thinking....")
         self._label.setAlignment(Qt.AlignCenter)
@@ -7711,11 +7810,11 @@ class NodeHoverTip(QWidget):
         self.raise_()
 
     def expand_to(self, x, y, w, h, pixmap):
-        """第三阶段：拉开展示框动效并渲染 SVG。**不锁定位置** —— 展开结束继续跟随鼠标。"""
+        """第三阶段：CSS 拉开展示框动效 + 正式渲染 SVG；随后锁定不再跟随。"""
         self._move_anim.stop()
+        self._dragging = False
         self._pixmap = pixmap
-        self._has_svg = True
-        self._expanding = True
+        self._is_expanded = True
         start = self.geometry()
         self._anim.stop()
         self._anim.setStartValue(start)
@@ -7727,8 +7826,8 @@ class NodeHoverTip(QWidget):
     def hide_tip(self):
         self._anim.stop()
         self._move_anim.stop()
-        self._expanding = False
-        self._has_svg = False
+        self._is_expanded = False
+        self._dragging = False
         self.hide()
         self._label.clear()
         self._label.setPixmap(QPixmap())
@@ -7758,7 +7857,7 @@ class NodeView(QGraphicsView):
         self._drag_ghost = None
         self._highlighted_pw = None
         self._last_image_node = None  # 图纸拖入：记录最后放置的图纸（快速拼合）
-        # ---- 悬停详情（满 HOVER_REVEAL_DELAY_S 秒展开；展开后仍跟随；点击穿透；Esc 取消） ----
+        # ---- 悬停详情（满 HOVER_REVEAL_DELAY_S 秒展开；展开后锁定可拖动；26px 碰撞区；Esc 取消） ----
         self._hover_tip = None        # NodeHoverTip（惰性创建）
         self._hover_item = None       # 当前悬停的目标元素框
         self._hover_enter = 0.0       # 进入时刻（time.monotonic 秒）
@@ -7909,7 +8008,9 @@ class NodeView(QGraphicsView):
                 if isinstance(item, ClassNode):
                     self.scene().remove_class(item)
                 elif isinstance(item, (APINode, CsvDataNode, DataProcessNode, ContainerNode,
-                                       StepperNode, SiteParserNode, ImageNode)):
+                                       StepperNode, SiteParserNode, ImageNode)) or                         type(item).__name__ == 'PortNode':
+                    if type(item).__name__ == 'PortNode' and item.is_running():
+                        item.stop()
                     self.scene().remove_node(item)
                 elif isinstance(item, ConnectionPath):
                     scene = self.scene()
@@ -7938,7 +8039,8 @@ class NodeView(QGraphicsView):
         elif event.key() == Qt.Key_A and (event.modifiers() & Qt.ControlModifier):
             for item in self.scene().items():
                 if isinstance(item, (APINode, CsvDataNode, DataProcessNode, ContainerNode,
-                                     StepperNode, SiteParserNode, ClassNode, ImageNode, ConnectionPath)):
+                                     StepperNode, SiteParserNode, ClassNode, ImageNode,
+                                     ConnectionPath)) or type(item).__name__ == 'PortNode':
                     item.setSelected(True)
             event.accept()
         elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
@@ -7971,6 +8073,22 @@ class NodeView(QGraphicsView):
     def _find_port_at(self, scene_pos):
         """查找场景位置对应的端口，返回 (port_fn, obj, param_name_or_None)"""
         for item in self.scene().items():
+            if type(item).__name__ == 'PortNode':
+                best, best_d = None, 15
+                for nm in item.input_names():
+                    p = item.input_port(nm)
+                    d = (p - scene_pos).manhattanLength()
+                    if d < best_d:
+                        best_d = d
+                        best = (lambda n=item, k=nm: n.input_port(k), item, nm)
+                for nm in item.output_names():
+                    p = item.output_port(nm)
+                    d = (p - scene_pos).manhattanLength()
+                    if d < best_d:
+                        best_d = d
+                        best = (lambda n=item, k=nm: n.output_port(k), item, k)
+                if best:
+                    return best
             if isinstance(item, APINode):
                 out = item.outputPort()
                 if (out - scene_pos).manhattanLength() < 15:
@@ -8053,7 +8171,10 @@ class NodeView(QGraphicsView):
     def _hit_test_item(self, scene_pos):
         for item in self.scene().items(scene_pos):
             if isinstance(item, (APINode, DataProcessNode, CsvDataNode, ContainerNode,
-                                 StepperNode, SiteParserNode, ClassNode, ImageNode, ConnectionPath)):
+                                 StepperNode, SiteParserNode, ClassNode, ImageNode,
+                                 ConnectionPath)):
+                return True
+            if type(item).__name__ == 'PortNode':
                 return True
         return False
 
@@ -8629,7 +8750,7 @@ class NodeView(QGraphicsView):
             self._hover_tip = NodeHoverTip()
         tip = self._hover_tip
         x, y = self._hover_screen_pos()
-        if tip.isVisible() and not tip._has_svg:
+        if tip.isVisible() and not tip._is_expanded:
             # 不同元素框间快速切换：thinking 内容不变，平滑滑到新锚点
             tip.animate_move_to(x, y)
         else:
@@ -8661,38 +8782,40 @@ class NodeView(QGraphicsView):
 
     def _hover_window_active(self):
         """悬停提示仅在本窗口可见且为活动窗口、鼠标确在本窗口上时触发，
-        防止隔着其他应用窗口仍弹出提示。
-
-        浮窗现在是**点击穿透**的（`Qt.WindowTransparentForInput`）：鼠标事件直接落到下层
-        窗口，所以这里只需要看「鼠标最顶层窗口是不是本窗口」。下面仍保留一段 tip 兜底
-        判断 —— 万一某个平台的 `topLevelAt` 仍返回本浮窗，也不会误判成「鼠标在别的窗口上」
-        而把提示关掉。
-        """
+        防止隔着其他应用窗口仍弹出提示。鼠标在本悬停浮窗上（含外扩碰撞区、
+        拖动移动中）一律视为有效。"""
         win = self.window()
         if win is None or not win.isVisible() or not win.isActiveWindow():
             return False
         gp = QCursor.pos()
+        tip = self._hover_tip
+        # ① 先按「几何关系」判：鼠标在本浮窗（含外扩碰撞区）里 → 一定仍在提示上。
+        #    这条必须排在最前，且不能依赖平台窗口枚举 —— 否则鼠标一移进 SVG 框，
+        #    下面 topLevelAt 若返回浮窗子控件就会判成「在其他窗口上」而立刻关闭。
+        if tip is not None and tip.contains_global(gp):
+            return True
+        # ② 再按「最顶层窗口」判：鼠标确实跑到别的应用/窗口上 → 失效。
         try:
             top = QApplication.topLevelAt(gp)
         except Exception:
-            return True      # 平台查询失败时不阻断（宁可显示，也别让整块功能失效）
-        if top is None or top is win:
-            return True
-        tip = self._hover_tip
-        if tip is not None:
-            try:
-                if top is tip or tip.isAncestorOf(top):
-                    return True   # 兜底：鼠标确实落在展示浮窗（或其子控件）上
-            except Exception:
-                pass
-        return False
+            top = None
+        if top is not None and top is not win:
+            if tip is not None:
+                try:
+                    if top is tip or tip.isAncestorOf(top):
+                        return True   # 鼠标在展示/拖动浮窗（或其子控件）上 → 保持有效
+                except Exception:
+                    pass
+            return False
+        return True
 
     def _poll_hover(self, pos=None):
         """轮询/鼠标移动时推进悬停提示阶段。pos=None 时取全局鼠标位置。
 
-        阶段：stage1/2 thinking（满 HOVER_REVEAL_DELAY_S 秒）→ stage3 拉开展示 SVG；
-        **展开后仍跟随鼠标**，鼠标不在本框上（或跑到别的框上）就立即收 / 换目标。
-        浮窗是点击穿透的，所以「鼠标落在浮窗上」不需要任何特殊处理（见 NodeHoverTip）。
+        阶段：stage1 thinking(0~4s) 平滑跟随鼠标 → 4s 起 stage3 拉开展示 SVG
+        并锁定位置（不再跟随）；展示后可按住拖动停留。鼠标离开触发节点后，
+        只要仍在本框外扩的不可视碰撞区内就保持不关闭，移出碰撞区才退出；
+        Esc 始终可退出。
         """
         if not getattr(self, '_hover_enabled', True):
             return
@@ -8706,23 +8829,26 @@ class NodeView(QGraphicsView):
         tip = self._hover_tip
         if pos is None:
             pos = self.viewport().mapFromGlobal(QCursor.pos())
+        gp = QCursor.pos() if pos is None else self.viewport().mapToGlobal(pos)
         in_viewport = self.viewport().rect().contains(pos)
 
-        # ---- stage3：SVG 已展示 → 继续跟随鼠标；离开元素框立即收 ----
+        # ---- stage3：SVG 展示已锁定，不再跟随鼠标，可拖动停留 ----
         if self._hover_stage >= 3 and self._hover_item is not None:
-            on_item = self._hover_target_at(pos) if in_viewport else None
-            if on_item is self._hover_item:
-                # 仍停留在原触发节点上 → 保持展示，并跟着鼠标走（点击穿透，挡不住操作）
-                if tip is not None and tip.isVisible():
-                    x, y = self._hover_screen_pos()
-                    tip.animate_move_to(x, y)
+            # ① 鼠标仍在本浮窗内（含框外 _GRAB 像素的不可视碰撞区）→ 直接保持展示。
+            #    这条必须**先判**：SVG 框很大、常常盖住画布上的其他元素框，
+            #    若先算命中就会把「鼠标移进框里」误判成「移到了另一个元素框」，
+            #    于是把浮窗关掉再开一个新的 —— 表现为「鼠标一进框就没了」。
+            if tip is not None and tip.contains_global(gp):
                 return
-            if on_item is not None:
+            on_item = self._hover_target_at(pos) if in_viewport else None
+            if on_item is not None and on_item is not self._hover_item:
                 # 鼠标移到另一元素框 → 结束当前展示，开始该元素的新一轮悬停
                 self._hide_hover_tip()
                 self._start_hover(on_item)
                 return
-            self._hide_hover_tip()   # 鼠标离开所有元素框 → 立即收
+            if on_item is self._hover_item:
+                return            # 仍停留在原触发节点上 → 保持展示
+            self._hide_hover_tip()  # 已彻底移出碰撞区 → 直接退出 SVG
             return
 
         # ---- stage1/2：thinking 阶段（需鼠标在画布内）----
@@ -8741,7 +8867,7 @@ class NodeView(QGraphicsView):
             return
         elapsed = time.monotonic() - self._hover_enter
         if elapsed >= HOVER_REVEAL_DELAY_S:
-            # 到点：预渲染 SVG（若尚未）→ 拉开展示框（展开结束仍跟随鼠标）
+            # 4s：预渲染 SVG（若尚未）→ 拉开展示框并锁定（不再跟随鼠标）
             if self._hover_stage < 2:
                 self._hover_stage = 2
                 self._hover_pixmap = self._render_svg_pixmap(self._hover_item)
@@ -8752,7 +8878,7 @@ class NodeView(QGraphicsView):
                     x, y = self._hover_screen_pos()
                     tip.expand_to(x, y, pm.width() + 20, pm.height() + 20, pm)
             return
-        # 到点前：thinking 框平滑跟随鼠标锚点
+        # 4s 前：thinking 框平滑跟随鼠标锚点
         if tip is not None and tip.isVisible():
             x, y = self._hover_screen_pos()
             tip.animate_move_to(x, y)
@@ -8817,7 +8943,8 @@ class NodeView(QGraphicsView):
                 for item in self.scene().items():
                     if isinstance(item, (APINode, DataProcessNode, CsvDataNode,
                                          ContainerNode, StepperNode, SiteParserNode,
-                                         ClassNode, ImageNode)):
+                                         ClassNode, ImageNode)) or \
+                            type(item).__name__ == 'PortNode':
                         if rubber_scene_rect.contains(item.sceneBoundingRect()):
                             item.setSelected(True)
                     elif isinstance(item, ConnectionPath):
@@ -8831,7 +8958,8 @@ class NodeView(QGraphicsView):
                     sel_nodes = [it for it in self.scene().selectedItems()
                                  if isinstance(it, (APINode, DataProcessNode, CsvDataNode,
                                                     ContainerNode, StepperNode,
-                                                    SiteParserNode, ImageNode))]
+                                                    SiteParserNode, ImageNode))
+                                 or type(it).__name__ == 'PortNode']
                     if sel_nodes:
                         self.scene().create_class_from_nodes(sel_nodes)
             self._rubber_band_origin = None
@@ -9065,7 +9193,7 @@ class NodeView(QGraphicsView):
                 node = APINode()
                 node.api_ref = src
                 node.set_api(ep['method'], ep['path'], ep.get('parameters', []),
-                             ep.get('headers', {}))
+                             ep.get('headers', {}), ep.get('body', ''))
                 self.scene().add_node(node)
                 node.setPos(scene_pos.x() - node.rect().width()/2,
                             scene_pos.y() - node.rect().height()/2)
@@ -9840,6 +9968,15 @@ class FlowEditorDialog(QDialog):
         self._log_rich_mode = False      # False=纯文本 True=富文本
         self._log_lines = []             # 权威日志行列表（完整，不受窗口裁剪影响）
         self._rich_log_text = None       # 富文本 QTextEdit（_init_ui 创建）
+        # ---- 断点总线：worker 线程暂停 → 主线程弹面板（P2）----
+        self._flow_paused = False
+        self._debug_active = False
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            get_bridge().pauseRequested.connect(self._on_debug_pause)
+            get_bridge().liveEvent.connect(self._on_debug_live)
+        except Exception:
+            pass
         # 日志窗口 [start, end)：纯文本与富文本共用，保证两种状态页面同步
         self._rich_window_start = 0      # 窗口起始日志行索引
         self._rich_window_end = 0        # 窗口结束日志行索引（不含）
@@ -10064,6 +10201,18 @@ class FlowEditorDialog(QDialog):
         self.btn_run.clicked.connect(self.run_flow)
         tb.addWidget(self.btn_run)
 
+        # 断点状态按钮：红点 = 已开启断点；点一下打开断点/报文面板
+        self.btn_breakpoints = QToolButton()
+        self.btn_breakpoints.setText("○ 断点 0")
+        self.btn_breakpoints.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.btn_breakpoints.setToolTip("已开启的断点数量；点击打开断点/实时报文面板")
+        self.btn_breakpoints.setStyleSheet(
+            "QToolButton { background:transparent; color:#e0a0a0;"
+            "border:1px solid #5a3a3a; border-radius:3px; padding:4px 8px;"
+            "font-size:11px; } QToolButton:hover { background:#3a1e1e; }")
+        self.btn_breakpoints.clicked.connect(self._open_debug_panel)
+        tb.addWidget(self.btn_breakpoints)
+
         # ---- 轮询参数：**横向折叠**（默认收起）----
         # 这三项已经并进画板顶部的「数据传递参数」仪表盘、并随图纸保存，
         # 工具栏上再占一整排就太挤了；折叠起来给功能键腾位置（保险起见不删）。
@@ -10179,6 +10328,22 @@ class FlowEditorDialog(QDialog):
         """)
         self.btn_add_container.clicked.connect(self._on_add_container_clicked)
         tb.addWidget(self.btn_add_container)
+
+        # ---- 端口工具：Modbus / PROFINET / WebSocket 全在这一个面板里 ----
+        self.btn_port_console = QPushButton('🖥 端口工具')
+        self.btn_port_console.setToolTip('端口查看/编辑/新建（Modbus、PROFINET、WebSocket）')
+        self.btn_port_console.setStyleSheet(
+            'QPushButton { background:#3a4a5e; color:white; border-radius:4px;'
+            ' padding:6px 14px; font-weight:bold; } QPushButton:hover { background:#4a5d75; }')
+        self.btn_port_console.clicked.connect(self._open_port_console)
+        tb.addWidget(self.btn_port_console)
+        self.btn_sync_cfg = QPushButton('⬆ 同步到图源配置')
+        self.btn_sync_cfg.setToolTip('把画布上的 POST/PUT/PATCH 节点写进「图源配置」')
+        self.btn_sync_cfg.setStyleSheet(
+            'QPushButton { background:#5c4a2a; color:#ffe8c0; border-radius:4px;'
+            ' padding:6px 12px; } QPushButton:hover { background:#6d5833; }')
+        self.btn_sync_cfg.clicked.connect(self._sync_api_nodes_to_config)
+        tb.addWidget(self.btn_sync_cfg)
 
         # 保存/加载按钮
         self.btn_save = QPushButton("💾 保存流程")
@@ -10492,6 +10657,10 @@ class FlowEditorDialog(QDialog):
         返回 False 表示已被取消。"""
         deadline = time.time() + secs
         while time.time() < deadline and not self._inner_cancel:
+            if getattr(self, '_flow_paused', False):
+                QApplication.processEvents()
+                time.sleep(0.05)
+                continue          # 断点暂停期间不推进等待计时
             QApplication.processEvents()
             time.sleep(0.05)
         return not self._inner_cancel
@@ -10538,7 +10707,7 @@ class FlowEditorDialog(QDialog):
         node = APINode()
         node.api_ref = src
         node.set_api(ep['method'], ep['path'], ep.get('parameters', []),
-                     ep.get('headers', {}))
+                     ep.get('headers', {}), ep.get('body', ''))
         self.scene.add_node(node)
         center = self.view.mapToScene(self.view.viewport().rect().center())
         node.setPos(center.x() - node.rect().width()/2, center.y() - node.rect().height()/2)
@@ -10575,6 +10744,105 @@ class FlowEditorDialog(QDialog):
         self.scene.add_node(node)
         center = self.view.mapToScene(self.view.viewport().rect().center())
         node.setPos(center.x() - node.rect().width()/2, center.y() - node.rect().height()/2)
+
+    def _on_add_port_node(self, proto='modbus'):
+        """工具栏 → 在画布中心放一个端口节点（Modbus / PROFINET / WebSocket）。"""
+        from portpanel.ui.port_node import PortNode
+        node = PortNode(proto=proto)
+        # 依次排开，别叠在一起
+        same = [n for n in self.scene.nodes if type(n).__name__ == 'PortNode']
+        node.listen_port = 15020 + 10 * len(same)
+        node.outputs = [{'name': 'out1', 'host': '127.0.0.1',
+                         'port': node.listen_port + 1}]
+        node.name = {'modbus': 'Modbus 端口', 'profinet': 'PROFINET 端口',
+                     'websocket': 'WebSocket 端口'}.get(proto, '端口')
+        self.scene.add_node(node)
+        center = self.view.mapToScene(self.view.viewport().rect().center())
+        node.setPos(center.x() - node.rect().width() / 2 + 40 * len(same),
+                    center.y() - node.rect().height() / 2 + 120 * len(same))
+        self.scene.clearSelection()
+        node.setSelected(True)
+        try:
+            self.api_log_text.append('🔌 已添加端口节点 %s（监听 %d → %d），双击可改配置'
+                                     % (node.name, node.listen_port, node.target_port))
+        except Exception:
+            pass
+        return node
+
+    def _sync_api_nodes_to_config(self):
+        """把图纸里的 POST/PUT/PATCH 节点写回「图源配置」（method/path/body/body_kind）。"""
+        try:
+            from portpanel.ui.image_source import APIConfigDialog
+        except Exception as exc:
+            self.api_log_text.append('⚠ 同步失败：%s' % exc)
+            return 0
+        nodes = [n for n in self.scene.nodes
+                 if isinstance(n, APINode) and n.is_terminal()]
+        if not nodes:
+            self.api_log_text.append('ℹ 没有 POST/PUT/PATCH 节点需要同步')
+            return 0
+        dlg = None
+        try:
+            dlg = APIConfigDialog(self)
+            sources = dlg.config.setdefault('image_sources', [])
+            changed = 0
+            for n in nodes:
+                ref = n.api_ref or {}
+                name = ref.get('name', '')
+                base = ref.get('base_url', '')
+                src = None
+                for it in sources:
+                    if name and it.get('name') == name:
+                        src = it
+                        break
+                if src is None:
+                    for it in sources:
+                        if base and base in str(it.get('base_url', '')):
+                            src = it
+                            break
+                if src is None:
+                    src = {'name': name or n.url_path.strip('/') or '端口推送',
+                           'base_url': base, 'endpoints': []}
+                    sources.append(src)
+                eps = src.setdefault('endpoints', [])
+                ep = next((e for e in eps if e.get('path') == n.url_path), None)
+                if ep is None:
+                    ep = {'id': '%08x' % (abs(hash(n.url_path)) & 0xFFFFFFFF)}
+                    eps.append(ep)
+                ep.update({'method': n.method, 'path': n.url_path,
+                           'headers': dict(n.headers or {}),
+                           'body': getattr(n, 'body', '') or '',
+                           'body_kind': getattr(n, 'body_kind', 'none')})
+                ep.setdefault('parameters', [dict(p) for p in (n.params or [])])
+                changed += 1
+            dlg.save_config()
+            self.api_log_text.append('✅ 已同步 %d 个终端节点到图源配置' % changed)
+            return changed
+        except Exception as exc:
+            self.api_log_text.append('⚠ 同步到图源配置失败：%s' % exc)
+            return 0
+        finally:
+            if dlg is not None:
+                try:
+                    dlg.close()
+                    dlg.deleteLater()
+                except Exception:
+                    pass
+
+    def _open_port_console(self):
+        from portpanel.ui.port_console import PortConsole
+        nodes = [n for n in self.scene.nodes if type(n).__name__ == 'PortNode']
+        if not nodes:
+            self.api_log_text.append('⚠ 画布上还没有端口节点')
+            return
+        dlg = PortConsole(nodes, self, create_cb=self._on_add_port_node)
+        dlg.setModal(False)
+        dlg.setWindowModality(Qt.NonModal)
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+        dlg.setAttribute(Qt.WA_DeleteOnClose, False)
+        dlg.show()
+        self._port_console = dlg          # 保活，可随手关掉再开
+        return dlg
 
     def _on_add_stepper_clicked(self):
         """工具栏 → 添加步进器特殊元素框"""
@@ -10659,7 +10927,7 @@ class FlowEditorDialog(QDialog):
             # new_ep 没有 headers 键时传 None → set_api 保持节点现有请求头不动
             new_headers = new_ep.get('headers', None)
             node.set_api(new_ep['method'], new_ep['path'], new_ep.get('parameters', []),
-                         new_headers)
+                         new_headers, new_ep.get('body', ''))
             # 恢复已有参数的值
             for p in node.params:
                 if p['name'] in old_values:
@@ -10912,6 +11180,22 @@ class FlowEditorDialog(QDialog):
                 data = json.load(f)
         except Exception as e:
             QMessageBox.critical(self, "读取失败", f"无法读取文件:\n{str(e)}")
+            return
+
+        # 未知节点保护：端口节点（P3）等新类型目前由 tools/run_port_flow.py 执行，
+        # 编辑器还没有画布渲染。**直接拒绝加载**，避免「静默丢节点 + 覆盖保存」。
+        _known = {'APINode', 'CsvDataNode', 'DataProcessNode', 'ContainerNode',
+                  'StepperNode', 'SiteParserNode', 'ImageNode', 'ClassNode',
+                  'PortNode'}
+        _unknown = sorted({str(n.get('type')) for n in (data.get('nodes') or [])
+                           if str(n.get('type')) not in _known})
+        if _unknown:
+            QMessageBox.warning(
+                self, "图纸包含未支持节点",
+                "这张图纸含有编辑器暂不支持的节点类型：\n\n  %s\n\n"
+                "端口节点请用命令行执行：\n"
+                "  python tools/run_port_flow.py --simulate\n\n"
+                "为避免覆盖保存丢数据，本次不加载。" % '、'.join(_unknown))
             return
 
         # 清空当前场景 + 重置撤销栈
@@ -11850,6 +12134,8 @@ class FlowEditorDialog(QDialog):
                     ef = en.inputPort
                 elif isinstance(en, ClassNode):
                     ef = en.inputPort if not getattr(en, '_is_main', False) else en.outputPort
+                elif type(en).__name__ == 'PortNode':
+                    ef = en.inputPort
                 else:
                     ef = lambda: QPointF()
                 conn = ConnectionPath(sf, ef, sn, en, ep, start_param=sh)
@@ -11896,6 +12182,8 @@ class FlowEditorDialog(QDialog):
                     'url_path': node.url_path,
                     'params': node.params,
                     'headers': node.headers,
+                    'body': getattr(node, 'body', ''),
+                    'body_kind': getattr(node, 'body_kind', 'none'),
                     'result_json': node.result_json,
                     'api_ref': node.api_ref,
                     'concat_widgets': [
@@ -11905,6 +12193,8 @@ class FlowEditorDialog(QDialog):
                         for cw in node._concat_widgets
                     ],
                 })
+            elif type(node).__name__ == 'PortNode':
+                nd.update(node.to_dict())
             elif isinstance(node, CsvDataNode):
                 nd.update({
                     'file_path': node.file_path,
@@ -12166,6 +12456,8 @@ class FlowEditorDialog(QDialog):
                     ef = en.inputPort
                 elif isinstance(en, ClassNode):
                     ef = en.inputPort if not getattr(en, '_is_main', False) else en.outputPort
+                elif type(en).__name__ == 'PortNode':
+                    ef = en.inputPort
                 else:
                     ef = lambda: QPointF()
                 conn = ConnectionPath(sf, ef, sn, en, ep, start_param=sh)
@@ -12201,6 +12493,8 @@ class FlowEditorDialog(QDialog):
                     'url_path': node.url_path,
                     'params': [dict(p) for p in node.params],
                     'headers': dict(node.headers),
+                    'body': getattr(node, 'body', ''),
+                    'body_kind': getattr(node, 'body_kind', 'none'),
                     'result_json': node.result_json,
                     'api_ref': dict(node.api_ref),
                     'concat_widgets': [
@@ -12365,6 +12659,8 @@ class FlowEditorDialog(QDialog):
                     ef = en.inputPort
                 elif isinstance(en, ClassNode):
                     ef = en.inputPort if not getattr(en, '_is_main', False) else en.outputPort
+                elif type(en).__name__ == 'PortNode':
+                    ef = en.inputPort
                 else:
                     ef = lambda: QPointF()
                 conn = ConnectionPath(sf, ef, sn, en, ep, start_param=sh)
@@ -12380,6 +12676,9 @@ class FlowEditorDialog(QDialog):
         """反序列化单节点，校验数据文件是否存在"""
         typ = ndata.get('type', '')
         try:
+            if typ == 'PortNode':
+                from portpanel.ui.port_node import PortNode
+                return PortNode.from_dict(ndata)
             if typ == 'APINode':
                 params = ndata.get('params', [])
                 node = APINode()
@@ -12388,7 +12687,10 @@ class FlowEditorDialog(QDialog):
                 # 而按钮文案/悬停提示是按 self.headers 画出来的，晚赋值会留下陈旧按钮。
                 node.headers = dict(ndata.get('headers', {}) or {})
                 node.set_api(ndata.get('method', 'GET'), ndata.get('url_path', '/'),
-                             [dict(p) for p in params], node.headers)
+                             [dict(p) for p in params], node.headers,
+                             ndata.get('body', ''))
+                node.body_kind = (ndata.get('body_kind')
+                                  or infer_body_kind(node.body, node.headers))
                 node.result_json = ndata.get('result_json')
                 return node
             elif typ == 'CsvDataNode':
@@ -13665,6 +13967,9 @@ class FlowEditorDialog(QDialog):
 
     def _execute_api_node(self, node, round_index, progress_cb=None):
         """执行单个 APINode 的 HTTP 请求，返回响应数据"""
+        if type(node).__name__ == 'PortNode':
+            return None            # 端口节点由自己的启停驱动，不参与 API 执行
+        self._round_executed = getattr(self, '_round_executed', 0) + 1
         full_url, method, _values = self._compute_api_url(node, round_index)
         # 节点级自定义请求头：${ENV:VAR} 取环境变量，${DATE:时区} 现取当前时间。
         # 空值 = 显式不发该头（可用来屏蔽内置默认 UA）。
@@ -13681,13 +13986,58 @@ class FlowEditorDialog(QDialog):
                 f"⚠️ 请求头中的环境变量未取到: {', '.join(missing_env)}（对应请求头按空值处理）")
         for _n in dyn_notes:
             self.api_log_text.append(f"🕒 实时时间头: {_n}")
-        dl_result, is_tmp, used_curl, err, content_type = self._threaded_request(
-            method, full_url, timeout=self._run_transfer().api_timeout_tuple,
-            progress_cb=progress_cb, headers=node_headers)
-        return self._process_api_result(
-            node, full_url, method, round_index,
-            dl_result, is_tmp, used_curl, err, content_type,
-            progress_cb=progress_cb)
+        _body_kind = getattr(node, 'body_kind', 'none') or 'none'
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            _debug_bridge = get_bridge()
+            _dbg_armed = _debug_bridge.is_armed(node)
+        except Exception:
+            _debug_bridge = None
+            _dbg_armed = False
+        # 断点期间：不让「空响应 / 下载层错误」被当成轮次结束（否则步进器会被反复刷新）
+        self._debug_active = bool(_dbg_armed)
+        if _debug_bridge is not None:
+            try:
+                _debug_bridge.liveEvent.emit({'phase': 'request', 'method': method,
+                                              'url': full_url, 'node': node})
+            except Exception:
+                pass
+        if _dbg_armed or _body_kind != 'none' or method not in ('GET', 'HEAD'):
+            # P1a：非 GET/HEAD 或带 body → 统一 transport（接线在 ui/adapters/api_bridge）
+            from portpanel.ui.adapters.api_bridge import send_via_transport
+            _dl = send_via_transport(
+                self, node, full_url, method, _values, node_headers,
+                cancel_check=lambda: bool(self._inner_cancel))
+            (dl_result, is_tmp, used_curl, err, content_type), _note = _dl
+            if _note:
+                self.api_log_text.append(_note)
+        else:
+            dl_result, is_tmp, used_curl, err, content_type = self._threaded_request(
+                method, full_url, timeout=self._run_transfer().api_timeout_tuple,
+                progress_cb=progress_cb, headers=node_headers)
+        try:
+            return self._process_api_result(
+                node, full_url, method, round_index,
+                dl_result, is_tmp, used_curl, err, content_type,
+                progress_cb=progress_cb)
+        finally:
+            if _debug_bridge is not None:
+                try:
+                    from portpanel.ui.debug.inspect_panel import masked_headers as _masked_headers
+                    _payload = {
+                        'status': getattr(dl_result, 'status_code', ''),
+                        'via': ('curl' if used_curl else 'requests'),
+                        'elapsed_ms': getattr(dl_result, 'elapsed_ms', ''),
+                        'headers': _masked_headers(getattr(dl_result, 'headers', None)),
+                        'body': (getattr(dl_result, 'content', b'') or b'')[:4000],
+                        'error': (err or ''),
+                    }
+                    _debug_bridge.liveEvent.emit({
+                        'phase': 'response', 'method': method, 'url': full_url,
+                        'status': _payload['status'], 'payload': _payload})
+                except Exception:
+                    pass
+            self._debug_active = False
 
     def _process_api_result(self, node, full_url, method, round_index,
                             dl_result, is_tmp, used_curl, err, content_type,
@@ -13852,7 +14202,8 @@ class FlowEditorDialog(QDialog):
             msg = str(e)
             # 记录本轮本组的下载层错误：自增轮询据此判定「该停下来了」
             try:
-                self._round_api_errors.append((node, msg))
+                if not getattr(self, '_debug_active', False):
+                    self._round_api_errors.append((node, msg))
             except Exception:
                 pass
             if 'curl_cffi' in msg:
@@ -14865,6 +15216,8 @@ class FlowEditorDialog(QDialog):
         从 executed_node 开始，仅推进下游链中最深（叶子）节点的索引。
         当叶子节点的索引绕回 0 时，向上游传递进位，推进上一级节点的索引。
         """
+        if getattr(self, '_flow_paused', False):
+            return                      # 断点暂停期间绝不推进（否则步进器会空转）
         # 构建下游链：executed_node → ... → leaf
         chain = []
         def _build_chain(node, visited=None):
@@ -15133,6 +15486,146 @@ class FlowEditorDialog(QDialog):
             # 快照作废：流程结束后再发起的单次请求按仪表盘当前值走
             self._run_cfg = None
 
+    def _refresh_breakpoint_btn(self):
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            n = get_bridge().armed_count()
+        except Exception:
+            n = 0
+        try:
+            self.btn_breakpoints.setText(('● 断点 %d' if n else '○ 断点 0') % n)
+            self.btn_breakpoints.setStyleSheet(
+                ("QToolButton { background:#3a1e1e; color:#ffb3b3;"
+                 "border:1px solid #e05252; border-radius:3px; padding:4px 8px;"
+                 "font-size:11px; }") if n else
+                ("QToolButton { background:transparent; color:#e0a0a0;"
+                 "border:1px solid #5a3a3a; border-radius:3px; padding:4px 8px;"
+                 "font-size:11px; } QToolButton:hover { background:#3a1e1e; }"))
+        except Exception:
+            pass
+
+    def _open_debug_panel(self):
+        """工具栏红点：打开第一条已开启断点（没有就用当前选中的 API 元素框）。"""
+        node = None
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            b = get_bridge()
+            for n in getattr(self.scene, 'nodes', []):
+                if isinstance(n, APINode) and b.is_armed(n):
+                    node = n
+                    break
+        except Exception:
+            pass
+        if node is None:
+            for n in getattr(self.scene, 'nodes', []):
+                if isinstance(n, APINode):
+                    node = n
+                    break
+        if node is None:
+            self.api_log_text.append("⚠ 画布上还没有 API 元素框，无法打开断点面板")
+            return
+        from portpanel.ui.debug.panel_host import open_for_node
+        open_for_node(node, view=self.view)
+
+    def _on_debug_live(self, ev):
+        """执行期间实时把每条支路的请求/响应写进面板（不打断流程）。"""
+        try:
+            from portpanel.ui.debug import panel_host
+            p = panel_host.get_panel()
+            if p is not None and p.isVisible():
+                p.set_live(ev.get('method', ''), ev.get('url', ''),
+                           ev.get('phase', ''), ev.get('status'))
+                if ev.get('phase') == 'response' and ev.get('payload'):
+                    p.set_response_payload(ev['payload'])
+        except Exception as exc:
+            self._debug_last_err = repr(exc)
+
+    def _on_debug_pause(self, node, req):
+        """worker 线程在 pre-send 处断住 → 主线程记日志 + 弹面板。"""
+        self._flow_paused = True
+        try:
+            pos = node.pos()
+            where = f"{getattr(node, 'method', 'GET')} {getattr(node, 'url_path', '')}"                     f"（位置 {pos.x():.0f},{pos.y():.0f}）"
+        except Exception:
+            where = str(node)
+        self.api_log_text.append(f"⏸ 已断点 - {where}")
+        try:
+            if getattr(node, 'breakpoint_dot', None) is not None:
+                node.breakpoint_dot.set_triggered(True)
+        except Exception:
+            pass
+
+        from portpanel.ui.debug.panel_host import open_for_node
+        panel = open_for_node(node, view=self.view)
+        try:
+            panel.set_request(req)
+        except Exception:
+            pass
+        # 入口各输入点的实时值（service / creator_id / q / o …）：核对上游有没有送到
+        try:
+            from portpanel.ui.debug.panel_host import inputs_for_node
+            panel.set_inputs(inputs_for_node(node))
+        except Exception:
+            pass
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            panel.set_armed(get_bridge().is_armed(node))
+        except Exception:
+            pass
+
+        # 上下轮询锁：上游数据没到齐之前不允许放行（防止拿上一轮数据造成竞态）
+        def _gate_check():
+            ready, why = True, ''
+            try:
+                ready, why = self._node_round_gate(
+                    node, getattr(self, '_round_skipped', set()))
+            except Exception:
+                ready, why = True, ''
+            panel.set_release_enabled(ready, why)
+            if not ready:
+                QTimer.singleShot(150, _gate_check)
+
+        _gate_check()
+
+        def _finish(edited):
+            try:
+                panel.released.disconnect(_finish)
+            except Exception:
+                pass
+            try:
+                panel.cancelled.disconnect(_cancel)
+            except Exception:
+                pass
+            try:
+                if getattr(node, 'breakpoint_dot', None) is not None:
+                    node.breakpoint_dot.set_triggered(False)
+            except Exception:
+                pass
+            self._flow_paused = False
+            from portpanel.ui.debug.bridge import get_bridge
+            from portpanel.engine.intercept import DebugDecision
+            if edited is None:
+                self.api_log_text.append(f"⛔ 断点丢弃 - {where}")
+                get_bridge().submit(DebugDecision(action='drop'))
+            else:
+                self.api_log_text.append(f"▶ 断点放行 - {where}")
+                get_bridge().submit(DebugDecision(action='release', request=edited))
+            # 不隐藏：执行期间面板常驻画板前部，继续实时看报文（编辑者要求）
+
+        def _cancel():
+            _finish(req)          # 关掉面板 = 原样放行，避免流程卡死
+
+        panel.released.connect(_finish)
+        panel.cancelled.connect(_cancel)
+
+    def _round_stalled(self, g_auto, paged):
+        """本轮是否「空转」：自增/分页模式下，一个元素都没真正执行。
+
+        典型场景：上游接口失败（SSL/403）→ 数据库没有新行 → 下游全被上下轮询锁跳过。
+        此时继续跑 99 轮只会空刷步进器，必须直接停。
+        """
+        return bool(paged or g_auto) and getattr(self, '_round_executed', 0) == 0
+
     def _run_group_loop(self, groups, wait_time, csv_nodes, has_csv, _depth=0):
         """执行【同一层】的分组；每组每轮跑完自己后，递归进入它的子层。
 
@@ -15226,6 +15719,8 @@ class FlowEditorDialog(QDialog):
                 # 每轮开始前：清空"本轮未就绪元素框"集合（容器框根目录门控要用同一把锁；
                 # 步进器 / 站点解析在层级循环之前执行，先给它一个干净的空集合）
                 self._round_skipped = set()
+                # 本轮真正执行过几个元素（被轮询锁整轮跳过 = 0）
+                self._round_executed = 0
 
                 # 每轮开始前：数据库框行进位
                 # ⚠ 与下面的步进器推进放在同一时机——该节点若同时被
@@ -15292,6 +15787,7 @@ class FlowEditorDialog(QDialog):
                             continue
 
                         inner_polled = False
+                        self._round_executed = getattr(self, '_round_executed', 0) + 1
                         # ---- 内部小轮询：检测数组值（含拼合栏拖动绑定），批量并行下载 ----
                         _carrm = getattr(node, '_concat_array_values', None) or {}
                         _has_param_arr = bool(node._array_values) and any(
@@ -15525,8 +16021,9 @@ class FlowEditorDialog(QDialog):
                                                 f"  ⛔ 第{it['round']}项 下载失败: {reason}")
                                             # 记录本轮本组的下载层错误（自增轮询的终止依据）
                                             try:
-                                                self._round_api_errors.append(
-                                                    (it['node'], reason))
+                                                if not getattr(self, '_debug_active', False):
+                                                    self._round_api_errors.append(
+                                                        (it['node'], reason))
                                             except Exception:
                                                 pass
                                             return
@@ -15542,8 +16039,9 @@ class FlowEditorDialog(QDialog):
                                             self.api_log_text.append(
                                                 f"  ⛔ 下载中断: {_em}")
                                             try:
-                                                self._round_api_errors.append(
-                                                    (it['node'], str(_em)))
+                                                if not getattr(self, '_debug_active', False):
+                                                    self._round_api_errors.append(
+                                                        (it['node'], str(_em)))
                                             except Exception:
                                                 pass
                                         # 双层循环：由步进器驱动的「翻页接口」返回空 ⇒
@@ -15620,6 +16118,17 @@ class FlowEditorDialog(QDialog):
                         f"{'　' * (_depth + 1)}▶ 子层全部结束，"
                         f"[{g_label}] 恢复本层判定")
                     QApplication.processEvents()
+
+                # ---- 空转保护：本轮没有任何元素真正执行 → 直接结束本组循环 ----
+                # 典型场景：上游接口失败（如 SSL/403）→ 数据库没有新行 → 下游全被
+                # 上下轮询锁跳过；此时再跑 99 轮也只会空刷步进器。
+                if self._round_stalled(g_auto, _paged):
+                    self.api_log_text.append(
+                        "\n🛑 [%s] 第 %s 轮没有任何元素真正执行"
+                        "（上游数据未就绪或上一步全部失败），停止自增空转"
+                        % (g_label, round_idx))
+                    QApplication.processEvents()
+                    break
 
                 # ---- 自增轮询：本轮结束后判定是否该停 ----
                 if _paged:
@@ -15853,6 +16362,8 @@ class FlowEditorDialog(QDialog):
             if node in getattr(self, '_paged_page_apis', ()) \
                     and not getattr(node, 'result_json', None):
                 self.api_log_text.append("  📄 本页无数据（空响应）")
+                if getattr(self, '_debug_active', False):
+                    return False          # 断点放行后的空响应不算翻页结束
                 self._round_api_errors.append((node, '本页无数据（空响应）'))
                 return True
         except Exception:
