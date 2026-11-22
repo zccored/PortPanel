@@ -1,0 +1,33 @@
+<svg width="440" height="330" viewBox="0 0 440 330" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <style>
+      .box { fill: #1e2a3a; stroke: #cccccc; stroke-width: 2; stroke-dasharray: 6,4; rx: 8; }
+      .label { font-family: sans-serif; font-size: 12px; fill: #e0e0e0; }
+      .title { font-size: 14px; font-weight: bold; fill: #fff; }
+      .entry { font-family: sans-serif; font-size: 11px; fill: #9fc0e8; }
+      .desc-box { fill: #111822; }
+      .desc-text { font-family: sans-serif; font-size: 11px; fill: #aab; }
+      .portkey { font-family: sans-serif; font-size: 10.5px; fill: #dcdcdc; }
+      .portval { font-family: monospace; font-size: 10px; fill: #9fb0c0; }
+      .portnote { font-family: sans-serif; font-size: 10px; fill: #8899aa; }
+      .ok { fill: #7fd6b0; font-family: sans-serif; font-size: 11px; }
+      .wait { fill: #c9a227; font-family: sans-serif; font-size: 11px; }
+    </style>
+  </defs>
+
+  <rect x="10" y="10" width="420" height="310" class="box" />
+  <text x="220" y="32" class="label title" text-anchor="middle">逻辑门 · {{mode}}</text>
+  <text x="220" y="48" class="label entry" text-anchor="middle">{{name}}</text>
+  <text x="220" y="63" class="label" text-anchor="middle">条件结果 OUT = {{result}}</text>
+
+  <!-- 端口清单：NodeView._apply_hover_ports 在框被拉开那一刻按真实端口生成 -->
+  <!-- HOVER:PORTS top=78 tail=250 -->
+
+  <g transform="translate(0,{{tail_dy}})">
+    <line x1="20" y1="250" x2="420" y2="250" stroke="#444" stroke-width="1" />
+    <rect x="25" y="258" width="390" height="56" rx="4" class="desc-box" />
+    <text x="40" y="276" class="desc-text" font-weight="bold">📖 解释：</text>
+    <text x="40" y="292" class="desc-text">左侧 in1 / in2 只认 true / false；data 是要放行的数据。</text>
+    <text x="40" y="306" class="desc-text">右侧 OUT 输出条件结果，data 输出放行数据；条件不成立则阻断下游。</text>
+  </g>
+</svg>
