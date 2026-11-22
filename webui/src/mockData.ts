@@ -33,15 +33,15 @@ export const sampleState: PilotState = {
     },
     {
       id: 'demo-forum',
-      name: '示例论坛（分页 + 作者）',
+      name: '示例论坛（分页 + 分组）',
       base_url: 'https://forum.example.invalid',
       endpoints: [
         {
           path: '/thread/{tid}',
-          desc: '帖子接口：按作者与页码翻页',
+          desc: '主题接口：按分组与页码翻页',
           params: [
-            { name: 'tid', kind: 'string', value: '{tid}', note: '帖子 ID' },
-            { name: 'author', kind: 'string', value: '{author}', note: '作者名，由数据库框逐行提供' },
+            { name: 'tid', kind: 'string', value: '{tid}', note: '主题 ID' },
+            { name: 'author', kind: 'string', value: '{author}', note: '用户名，由数据库框逐行提供' },
             { name: 'p', kind: 'int', value: '{page}', note: '页码，由步进器当内层循环' },
           ],
         },

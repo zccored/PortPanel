@@ -98,7 +98,7 @@ cookies.txt
 data/secrets.local.json
 data/**/*.local.json
 
-# ===== B站流水线的本地运行数据（隐私：收藏/关注帖、去重表、游标、失败记录）=====
+# ===== 站点流水线的本地运行数据（隐私：收藏/关注帖、去重表、游标、失败记录）=====
 # 这些是用户自己的浏览数据，只在本机使用，不入库、不出包
 data/bili_seen.csv
 data/bili_failed.csv
