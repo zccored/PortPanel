@@ -271,6 +271,27 @@ def env_is_persisted(name) -> bool:
     return bool(str(val))
 
 
+_SECRETS_CACHE = {'path': '', 'mtime': 0.0, 'data': {}}
+
+
+def _secret_value(name: str):
+    """本地密钥文件兜底：data/secrets.local.json（不进仓库）。"""
+    try:
+        import json as _json
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(base, 'data', 'secrets.local.json')
+        if not os.path.exists(path):
+            return None
+        mt = os.path.getmtime(path)
+        if _SECRETS_CACHE['path'] != path or _SECRETS_CACHE['mtime'] != mt:
+            with open(path, encoding='utf-8') as fh:
+                _SECRETS_CACHE.update(path=path, mtime=mt, data=_json.load(fh) or {})
+        v = _SECRETS_CACHE['data'].get(name)
+        return v if isinstance(v, str) and v else None
+    except Exception:
+        return None
+
+
 def resolve_env_in_headers(extra):
     """把 ${ENV:NAME} 形式的头值替换为环境变量值。
 
@@ -286,10 +307,23 @@ def resolve_env_in_headers(extra):
         if not kk:
             continue
         sv = '' if v is None else str(v)
+        # 支持「整值」和「拼接值」两种写法：
+        #   Cookie: ${ENV:BILI_SESSDATA}; bili_jct=${ENV:BILI_JCT}
+        if '${ENV:' in sv:
+            import re as _re
+            for env_name in _re.findall(r'\$\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}', sv):
+                if not (os.environ.get(env_name) or _secret_value(env_name)):
+                    missing.append(env_name)
+            sv = _re.sub(r'\$\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}',
+                         lambda mm: os.environ.get(mm.group(1)) or _secret_value(mm.group(1)) or '',
+                         sv)
+            resolved[kk] = sv
+            continue
         m = _ENV_PLACEHOLDER_RE.match(sv.strip())
         if m:
             env_name = m.group(1)
-            env_val = os.environ.get(env_name)
+            # 先环境变量，再 data/secrets.local.json（由 tools/browser_cookies.py 生成）
+            env_val = os.environ.get(env_name) or _secret_value(env_name)
             if not env_val:
                 missing.append(env_name)
                 resolved[kk] = ''
@@ -1065,11 +1099,11 @@ class CookieImportDialog(QDialog):
 # ==================== 图源配置相关新增类 ====================
 
 class EndpointDebugWorker(QThread):
-    """子端口调试工作线程（requests 失败/被风控时自动降级 curl_cffi）"""
+    """子端口调试工作线程（requests 失败/被限流时自动降级 curl_cffi）"""
     # 响应体, 状态码, 错误消息, 诊断信息(dict)
     debug_completed = Signal(str, int, str, dict)
 
-    # 命中这些特征说明返回的是风控挑战页，而不是真实内容
+    # 命中这些特征说明返回的是限流挑战页，而不是真实内容
     _CHALLENGE_MARKERS = ('ddos-guard', 'just a moment', 'cf-chl',
                           'challenge-platform', 'attention required',
                           '__cf_chl', 'enable javascript and cookies')
@@ -1148,7 +1182,7 @@ class EndpointDebugWorker(QThread):
                 meta['attempts'].append({'via': 'requests', 'code': 0, 'error': str(e)})
 
             # ---- 第 2 轮：curl_cffi 回退 ----
-            # 触发条件：请求异常 / 403 / 429 / 503 / 命中风控挑战页特征。
+            # 触发条件：请求异常 / 403 / 429 / 503 / 命中限流挑战页特征。
             # 理由：Cloudflare、DDoS-Guard 一类只拦 TLS 指纹，换浏览器指纹即可通过，
             #       而这条链路正是 img_server 下载器已经在用的策略。
             need_fallback = (resp is None
@@ -1157,7 +1191,7 @@ class EndpointDebugWorker(QThread):
             if need_fallback and not HAS_CURL_CFFI:
                 meta['attempts'].append({
                     'via': 'curl_cffi', 'code': 0,
-                    'error': '未安装 curl_cffi（pip install curl_cffi 可绕过部分风控）'})
+                    'error': '未安装 curl_cffi（pip install curl_cffi 可绕过部分限流）'})
             elif need_fallback and HAS_CURL_CFFI:
                 try:
                     ck = dict(kwargs)
@@ -3436,7 +3470,7 @@ class APIConfigDialog(QDialog):
             ok_code = int((first_meta or {}).get('status_code') or 0)
             if code in (401, 403):
                 verdict = (f'❌ Cookie 没被接受（带 Cookie → {ok_code}，不带 Cookie → {code}）。\n'
-                           '   Cookie 可能已过期、不完整，或少了 cf_clearance 这类风控 cookie。\n'
+                           '   Cookie 可能已过期、不完整，或少了 cf_clearance 这类限流 cookie。\n'
                            '   建议重新从浏览器 Request Headers 里整条复制一次再导入。')
                 color = '#c62828'
             else:
@@ -3556,7 +3590,7 @@ class APIConfigDialog(QDialog):
             out.append(f"被限流，服务器要求等待 {rh['retry-after']} 秒后重试"
                        "（轮询这个接口时记得放慢）。")
         if 'cf-mitigated' in rh or ('cf-ray' in rh and code in (403, 429, 503)):
-            out.append('命中 Cloudflare 风控（cf-ray / cf-mitigated）—— '
+            out.append('命中 Cloudflare 限流（cf-ray / cf-mitigated）—— '
                        '可再点一次调试让它走 curl_cffi 通道，或检查请求头是否过于"不像浏览器"。')
         if 'location' in rh and code in (301, 302, 303, 307, 308):
             out.append(f"服务器重定向到：{rh['location']}")
@@ -3604,7 +3638,7 @@ class APIConfigDialog(QDialog):
                 lines.append(f'   {d}')
 
         if not meta.get('curl_available'):
-            lines.append("提示: 未安装 curl_cffi，遇到 Cloudflare 类风控无法自动降级")
+            lines.append("提示: 未安装 curl_cffi，遇到 Cloudflare 类限流无法自动降级")
 
         sent = meta.get('sent_headers') or {}
         lines.append('')
@@ -3757,7 +3791,7 @@ class APIConfigDialog(QDialog):
             detail['status_label'].setText("调试中...")
             detail['debug_btn'].setEnabled(False)
 
-        # 启动调试线程（首次走 requests；被 403/风控拦下会自动降级 curl_cffi）
+        # 启动调试线程（首次走 requests；被 403/限流拦下会自动降级 curl_cffi）
         worker = EndpointDebugWorker(method, full_url, headers, {}, body, self)
         worker.debug_completed.connect(
             lambda resp, code, err, meta, si=src_idx, ei=ep_idx: self._handle_debug_result(si, ei, resp, code, err, meta)
@@ -3818,7 +3852,7 @@ class APIConfigDialog(QDialog):
             detail['debug_info_toggle'].setVisible(True)
             detail['debug_info_toggle'].setChecked(False)
             detail['debug_info'].setVisible(False)
-            # 被风控拦下或降级重试过，自动展开，省得用户以为「就是没数据」
+            # 被限流拦下或降级重试过，自动展开，省得用户以为「就是没数据」
             attempts = meta.get('attempts') or []
             if len(attempts) > 1 or status_code in (401, 403, 429, 503):
                 detail['debug_info_toggle'].setChecked(True)

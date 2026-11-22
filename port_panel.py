@@ -37,7 +37,43 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+# ---- 压掉 Qt 的字体探测噪音 ----
+# 现象：控制台刷 "qt.text.font.db: OpenType support missing for \"Consolas\", script 19"
+# 原因：Qt 枚举系统字体时会按「书写系统(script)」探测 OpenType 表，很多中英字体没有
+#       对应表，Qt 就把警告打到 stderr。它不影响功能，但会盖住真正的日志。
+# 做法：① 关掉 qt.text.font.db 这个日志类别；② 再兜一层消息处理器，按文本丢弃同款警告。
+_qt_rules = os.environ.get('QT_LOGGING_RULES', '')
+if 'qt.text.font.db' not in _qt_rules:
+    os.environ['QT_LOGGING_RULES'] = (
+        (_qt_rules + ';') if _qt_rules else '') + 'qt.text.font.db=false'
+
 from PySide6.QtWidgets import QApplication                     # noqa: E402
+
+from PySide6.QtCore import qInstallMessageHandler            # noqa: E402
+
+
+def _qt_message_handler(mode, context, message):
+    """只放行有用的 Qt 日志；字体探测类整类丢弃。
+
+    Qt 在枚举系统字体时会按「书写系统(script)」探测 OpenType 表，
+    中英字体大多没有对应表，于是 stderr 被
+        qt.text.font.db: OpenType support missing for "Consolas", script 19
+    刷屏。这类信息对排查问题零价值，直接丢掉；其余日志原样输出。
+    """
+    try:
+        category = getattr(context, 'category', '') or ''
+    except Exception:
+        category = ''
+    if category == 'qt.text.font.db' or 'OpenType support missing' in message:
+        return
+    if category and category != 'default':
+        print('%s: %s' % (category, message), file=sys.stderr)
+    else:
+        print(message, file=sys.stderr)
+    sys.stderr.flush()
+
+
+qInstallMessageHandler(_qt_message_handler)
 
 
 def main() -> int:

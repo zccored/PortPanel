@@ -149,7 +149,7 @@ def image_source_tour_steps(dlg) -> List[TourStep]:
                 '名 / 类型 / 值 / <b>注释</b> 四列。值是接口要的参数，'
                 '<code>{name}</code> 这种占位符会在执行时被替换。<br><br>'
                 '<b>注释不是写给自己看的</b>：端口画板里鼠标悬停在 API 节点上时，'
-                '这一列会直接显示成提示（<code>—— 作者唯一标识符ID</code>）。'
+                '这一列会直接显示成提示（<code>—— 分组唯一标识符ID</code>）。'
                 '多写一句，三个月后的你会感谢现在的你。'
             ),
             anchor='right',
@@ -181,7 +181,7 @@ def image_source_tour_steps(dlg) -> List[TourStep]:
             title='不确定？直接「🚀 调试」',
             body=(
                 '它会<b>真的发一次请求</b>，然后把响应摊在下面给你看：'
-                '是不是风控页、返回的是不是你以为的那个 JSON、哪个头没生效。<br><br>'
+                '是不是限流页、返回的是不是你以为的那个 JSON、哪个头没生效。<br><br>'
                 '配接口时先在这里试通，再去画板里搭流程，能省很多来回。'
             ),
             anchor='right',

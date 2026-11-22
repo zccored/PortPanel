@@ -124,7 +124,7 @@ TRANSFER_SPECS = [
     dict(key='batch_workers', group='并发与频次', label='并行下载文件数', unit='个',
          kind='int', default=DL_BATCH_WORKERS, lo=1, hi=32, step=1, dec=0,
          tip='同时下载的文件数（对目标站的请求频次影响最大）。\n'
-             '调大＝更快但更容易触发风控 / DDoS 防护；调小＝更慢更温和。'),
+             '调大＝更快但更容易触发限流 / DDoS 防护；调小＝更慢更温和。'),
     dict(key='retry_attempts', group='并发与频次', label='单文件重试次数', unit='次',
          kind='int', default=DOWNLOAD_MAX_ATTEMPTS, lo=1, hi=10, step=1, dec=0,
          tip='每个文件最多尝试几次（含首次）。1＝不重试。'),
@@ -143,6 +143,18 @@ TRANSFER_SPECS = [
          kind='bool', default=False, mirror='poll_auto_chk',
          tip='勾选后，不属于任何类框的全局元素不按拨盘固定轮数跑，\n'
              f'而是从 1 递增到 {AUTO_POLL_MAX}，遇下载层报错或数据走完即停。'),
+    dict(key='api_interval', group='并发与频次', label='接口请求间隔', unit='秒',
+         kind='float', default=0.0, lo=0.0, hi=30.0, step=0.1, dec=1,
+         tip='每次 API 请求发出前的固定等待（下载文件不走这里）。遇到 412 / -352 限流时，'
+             '把它调到 1.0~2.0 秒最稳。'),
+    dict(key='cooldown_sec', group='并发与频次', label='限流冷却', unit='秒',
+         kind='float', default=0.0, lo=0.0, hi=600.0, step=5.0, dec=0,
+         tip='一旦接口返回 HTTP 412 或 code=-352（被限流），整条流程暂停这么久再继续。'
+             '0 = 不暂停。'),
+    dict(key='risk_retries', group='并发与频次', label='限流重试次数', unit='次',
+         kind='int', default=0, lo=0, hi=10, step=1, dec=0,
+         tip='连续命中限流（HTTP 412 / 429、code -352 / -412、响应含“限流/频繁”）时的容忍次数：'
+             '每命中一次先冷却，再继续；连续次数超过它就停止整条流程。0 = 一撞就停。'),
     # ---- 超时 ----
     dict(key='conn_timeout', group='超时', label='连接超时', unit='秒',
          kind='float', default=DOWNLOAD_TIMEOUT[0], lo=1.0, hi=120.0, step=1.0, dec=0,
@@ -1663,7 +1675,7 @@ class DownloadWorker(QThread):
             return
 
         # ---- 403 专门处理：不产生临时文件、不做无谓重试，直接跳过 ----
-        # requests 探测命中 403（常见于 DDoS-Guard / UA 风控 / 源站确无该内容）时，
+        # requests 探测命中 403（常见于 DDoS-Guard / UA 限流 / 源站确无该内容）时，
         # 不再把 403 错误页正文当作"文件内容"读入并转储/存盘。
         # 若装有 curl_cffi，先用浏览器指纹再探测一次（可绕过部分 DDoS-Guard 误拦）；
         # 若仍 403 或失败 → 判定服务端确实没有该内容，直接跳过该项。
@@ -1916,6 +1928,7 @@ def _sanitize_folder_segment(s):
 def _compute_rule_folder_name(rule_config, rule_data):
     """根据规则计算子文件夹名：创建时机值 + 时间(可选) + 文本拼合段（按顺序）。"""
     segs = []
+    produced = False          # 「内容」是否产出过片段（时间不算）
     # 创建时机值（分组标识）
     cp = (rule_config or {}).get('creation_path', '')
     if cp:
@@ -1923,6 +1936,7 @@ def _compute_rule_folder_name(rule_config, rule_data):
         if (val is not None and not isinstance(val, (dict, list))
                 and str(val) not in ('', 'None')):
             segs.append(_sanitize_folder_segment(val))
+            produced = True
     # 时间规则（标准 UTC）
     if (rule_config or {}).get('time_enabled'):
         import datetime
@@ -1951,6 +1965,16 @@ def _compute_rule_folder_name(rule_config, rule_data):
             seg = text
         if seg:
             segs.append(_sanitize_folder_segment(seg))
+            produced = True
+    # 兜底：正文为空（纯转发/纯图）时 content 解析不出东西，
+    # 用 fallback_path（如 $.opus_id）保证同一天多个空标题条目不挤进同一个文件夹。
+    if not produced:
+        fp = (rule_config or {}).get('fallback_path', '')
+        if fp:
+            fval = _resolve_rule_json_value(rule_data, fp)
+            if (fval is not None and not isinstance(fval, (dict, list))
+                    and str(fval) not in ('', 'None')):
+                segs.insert(0, _sanitize_folder_segment(fval))
     if not segs:
         segs.append('download')
     return '_'.join(segs)
@@ -2107,6 +2131,67 @@ def manifest_add(source_key, storage_path, local_rel, size, sha256=None):
         pass
 
 
+def _normalize_json_text(text):
+    """去掉“JSON 字符串又被 json.dumps 包了一层”的外壳。
+
+    响应体有时已经是 json.dumps 出来的字符串，落到文件里就成了
+    "{\"code\": 0, ...}"，jq / 程序读起来要先解一层。这里拆掉外层引号，
+    让文件就是原始 JSON 对象。
+    """
+    t = text.lstrip()
+    if not t.startswith('"'):
+        return text
+    try:
+        inner = json.loads(t)
+    except Exception:
+        return text
+    if isinstance(inner, str) and inner.lstrip()[:1] in ('{', '['):
+        return inner
+    return text
+
+
+def _json_post_id(text):
+    """从条目 JSON 里取稳定主键（opus/dyn id），取不到返回空串。"""
+    try:
+        j = json.loads(text)
+    except Exception:
+        return ''
+    if not isinstance(j, dict):
+        return ''
+    data = j.get('data') if isinstance(j.get('data'), dict) else None
+    item = (data or {}).get('item')
+    if isinstance(item, list):
+        item = item[0] if item else None
+    if not isinstance(item, dict):
+        return ''
+    for k in ('id_str', 'id'):
+        v = item.get(k)
+        if v:
+            return str(v)
+    return ''
+
+
+def _folder_has_same_post(folder, post_id):
+    """同目录已有同一条目的 JSON 就返回它的路径（一帖只留一份全量）。"""
+    if not post_id:
+        return ''
+    try:
+        names = os.listdir(folder)
+    except Exception:
+        return ''
+    for fn in names:
+        if not fn.endswith('.json') or fn == 'download_manifest.json':
+            continue
+        fp = os.path.join(folder, fn)
+        try:
+            with open(fp, 'r', encoding='utf-8') as f:
+                if _json_post_id(f.read()) == post_id:
+                    return fp
+        except Exception:
+            continue
+    return ''
+
+
 def _io_store_data(data, api_url, content_type, storage_path,
                    rule_config=None, rule_data=None):
     """纯文件 I/O：计算文件名并写盘。后台线程调用，不碰 UI。
@@ -2154,8 +2239,13 @@ def _io_store_data(data, api_url, content_type, storage_path,
         # 同名但大小不符：覆盖重写
     try:
         if is_json:
+            text = _normalize_json_text(content_bytes.decode('utf-8'))
+            # 一帖一份：目标站点报文里有“11分钟前更新”这类易变字段，不跳过会每轮多一份
+            same = _folder_has_same_post(storage_path, _json_post_id(text))
+            if same:
+                return True, f"已存在同帖: {os.path.basename(same)}", same, sha
             with open(fp, 'w', encoding='utf-8') as f:
-                f.write(content_bytes.decode('utf-8'))
+                f.write(text)
         else:
             with open(fp, 'wb') as f:
                 f.write(content_bytes)
@@ -2218,8 +2308,12 @@ def _io_store_data_from_file(tmp_path, api_url, content_type, storage_path,
                 pass
             # 同名但大小不符：覆盖重写
         if is_json:
+            text = _normalize_json_text(content_bytes.decode('utf-8'))
+            same = _folder_has_same_post(storage_path, _json_post_id(text))
+            if same:
+                return True, f"已存在同帖: {os.path.basename(same)}", same, sha
             with open(fp, 'w', encoding='utf-8') as f:
-                f.write(content_bytes.decode('utf-8'))
+                f.write(text)
         else:
             shutil.copyfile(tmp_path, fp)
         return True, f"已存: {fn}", fp, sha
@@ -3133,6 +3227,9 @@ class DataProcessNode(QGraphicsRectItem):
         self.regex = ""
         self.source_data = ""
         self.processed_data = ""
+        # key_by：把“单个值”升级成“按 key 分桶的字典”（翻页游标专用）
+        self.key_by = ''
+        self._keyed = {}
         self.source_path = ""  # JSON 路径绑定来源
         self._csv_source = None  # (CsvDataNode, header) 关联的CSV数据源
 
@@ -3235,6 +3332,21 @@ class DataProcessNode(QGraphicsRectItem):
         else:
             self.processed_data = self.source_data
         self.result_label.setText(f"处理后: {self.processed_data}")
+        try:
+            if getattr(self, 'key_by', ''):
+                _sc = self.scene()
+                _api = None
+                for _c in (getattr(_sc, 'connections', None) or []):
+                    if getattr(_c, 'end_obj', None) is self:
+                        _api = getattr(_c, 'start_obj', None)
+                        break
+                if _api is not None:
+                    _vv = getattr(_api, '_array_values', {}).get(self.key_by) or []
+                    _ii = getattr(_api, '_array_index', {}).get(self.key_by, 0)
+                    if 0 <= _ii < len(_vv):
+                        self._keyed[str(_vv[_ii])] = getattr(self, 'processed_data', '')
+        except Exception:
+            pass
         self._push_preview()
 
     def _on_editing_finished(self):
@@ -3253,6 +3365,21 @@ class DataProcessNode(QGraphicsRectItem):
         else:
             self.processed_data = self.source_data
         self.result_label.setText(f"处理后: {self.processed_data}")
+        try:
+            if getattr(self, 'key_by', ''):
+                _sc = self.scene()
+                _api = None
+                for _c in (getattr(_sc, 'connections', None) or []):
+                    if getattr(_c, 'end_obj', None) is self:
+                        _api = getattr(_c, 'start_obj', None)
+                        break
+                if _api is not None:
+                    _vv = getattr(_api, '_array_values', {}).get(self.key_by) or []
+                    _ii = getattr(_api, '_array_index', {}).get(self.key_by, 0)
+                    if 0 <= _ii < len(_vv):
+                        self._keyed[str(_vv[_ii])] = getattr(self, 'processed_data', '')
+        except Exception:
+            pass
         self._push_preview()
         self._resize_to_fit()
 
@@ -4399,6 +4526,29 @@ class CsvDataNode(QGraphicsRectItem):
         self._build_ui()
 
     # ================== 文件扫描（仅读表头+统计行数） ==================
+    def mouseDoubleClickEvent(self, event):
+        """双击框体：用**系统默认程序**打开当前数据表（CSV / Excel 都跟随系统）。
+
+        不写死 WPS/Excel：交给 QDesktopServices.openUrl，
+        用户在系统里把 .csv/.xlsx 关联成什么就用什么。
+        """
+        try:
+            path = (getattr(self, 'file_path', '') or '').strip()
+            if path and os.path.exists(path):
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                event.accept()
+                return
+            from PySide6.QtWidgets import QToolTip
+            QToolTip.showText(
+                event.screenPos(),
+                '数据表还没生成：%s' % (path or '(未设置文件)'), self)
+        except Exception:
+            pass
+        super().mouseDoubleClickEvent(event)
+
+
     def _load_headers_and_count(self, path):
         """读取表头和总行数，不加载数据行"""
         if not path or not os.path.exists(path):
@@ -5360,6 +5510,7 @@ class ContainerNode(QGraphicsRectItem):
         # ---- 规则模式状态（本地存储模式下可用）----
         self._rule_enabled = False           # 规则模式开关（右 = true）
         self._rule_creation_path = ''        # 创建时机 JSON 路径（如 $.id / $.user）
+        self._rule_fallback_path = ''        # 内容为空时的兜底路径（如 $.opus_id）
         self._rule_time_enabled = False      # 时间规则开关
         self._rule_time_format = 'yyyy-mm-dd'  # 时间格式（固定，UTC）
         self._rule_parts = []                # 拼合文本段（有序）：[{'id','text','source_path'}]
@@ -6368,6 +6519,7 @@ class APINode(QGraphicsRectItem):
             self.breakpoint_dot.set_armed(get_bridge().is_armed(self))
             self.breakpoint_dot.toggled.connect(
                 lambda on, _n=self: (get_bridge().set_armed(_n, on),
+                                     _n.set_breakpoint(on) if hasattr(_n, 'set_breakpoint') else None,
                                      self._refresh_breakpoint_btn()))
             _dot_row.addWidget(self.breakpoint_dot, 0, Qt.AlignRight | Qt.AlignBottom)
         except Exception:
@@ -6406,6 +6558,31 @@ class APINode(QGraphicsRectItem):
             )
             btn.setToolTip("点击添加自定义请求头（如 Cookie / Authorization）。\n"
                            "留空值 = 不发送该头；值支持 ${ENV:变量名} 占位符。")
+
+    def _refresh_breakpoint_btn(self):
+        """让工具栏的「断点」按钮跟着刷新。
+
+        注意：这个回调是从 `breakpoint_dot.toggled` 的 lambda 里调用的，
+        lambda 里的 self 是**节点**，原来直接写 `self._refresh_breakpoint_btn()`
+        调的是对话框的方法 → 每次点红点都 AttributeError。
+        这里沿 scene → views → window 找到对话框再刷新；找不到就静默返回
+        （节点自身的红点状态已由 set_armed 更新，不影响功能）。
+        """
+        try:
+            sc = self.scene()
+            for v in (sc.views() if sc else []):
+                getter = getattr(v, 'window', None)
+                dlg = getter() if callable(getter) else None
+                fn = getattr(dlg, '_refresh_breakpoint_btn', None)
+                if callable(fn) and dlg is not self:
+                    # 延后一拍再刷新：set_breakpoint() 内部可能再次触发 toggled，
+                    # 立即刷新会读到“切换过程中”的旧计数（表现为关掉断点后按钮仍显示 ● 1）。
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, fn)
+                    return
+        except Exception:
+            pass
+
 
     def mouseDoubleClickEvent(self, event):
         """双击元素框空白处 → 请求断点面板（P2；双击到子控件不会走到这里）。"""
@@ -7420,7 +7597,7 @@ class NodeScene(QGraphicsScene):
         members = [n for n in nodes if isinstance(
             n, (APINode, DataProcessNode, CsvDataNode, ContainerNode,
                 StepperNode, SiteParserNode, ImageNode))
-            or type(n).__name__ == 'PortNode']
+            or type(n).__name__ in ('PortNode', 'SwitchNode')]
         if not members:
             return None
         # 全部已属于同一个类 → 仅选择，不重复建类
@@ -7578,6 +7755,10 @@ _NODE_HOVER_SVG = (
 )
 
 
+_GATE_MODE_CN = {'AND': '与门 AND', 'NOT': '非门 NOT', 'XOR': '异或门 XOR',
+                 'gate': '闸门（旧）'}
+
+
 def _hover_escape(s):
     """SVG 文本的 XML 转义（防 & < > 破坏 SVG 结构）。"""
     return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -7592,7 +7773,7 @@ def _hover_truncate(s, n=22):
 def _hover_fit_text(s, max_px, em=10.0):
     """按**粗略像素宽度**截断文本（CJK/全角按 1em，其余按 0.58em）。
 
-    比按字符数截断准得多：同样是 8 个字符，「作者唯一标识符ID」约 82px，
+    比按字符数截断准得多：同样是 8 个字符，「分组唯一标识符ID」约 82px，
     「creator_」只有约 47px。图源配置里的注释大多是中文，按字符数算会溢出框。
     """
     s = str(s or '')
@@ -7844,7 +8025,10 @@ class NodeView(QGraphicsView):
         # 也就是说 Full 下每次改动都在重画整个视口（含内嵌的 proxy 控件），白扔约 5 倍。
         # 若将来在真机上发现 Minimal 留下描画痕迹，退一步用 BoundingRectViewportUpdate，
         # 但**不要**回到 FullViewportUpdate。
-        self.setViewportUpdateMode(QGraphicsView.MinimalViewportUpdate)
+        # MinimalViewportUpdate 只重绘“脏区域”，一旦 item 的 boundingRect 少算
+        # （端口画在 rect 外）就会留下拖影；用 BoundingRectViewportUpdate 兜底，
+        # 重绘范围 = 旧/新 boundingRect 并集，拖动元素框不会再有残留像素。
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setAcceptDrops(True)
         self._connecting = False
@@ -8008,8 +8192,8 @@ class NodeView(QGraphicsView):
                 if isinstance(item, ClassNode):
                     self.scene().remove_class(item)
                 elif isinstance(item, (APINode, CsvDataNode, DataProcessNode, ContainerNode,
-                                       StepperNode, SiteParserNode, ImageNode)) or                         type(item).__name__ == 'PortNode':
-                    if type(item).__name__ == 'PortNode' and item.is_running():
+                                       StepperNode, SiteParserNode, ImageNode)) or                         type(item).__name__ in ('PortNode', 'SwitchNode'):
+                    if type(item).__name__ in ('PortNode', 'SwitchNode') and item.is_running():
                         item.stop()
                     self.scene().remove_node(item)
                 elif isinstance(item, ConnectionPath):
@@ -8040,7 +8224,7 @@ class NodeView(QGraphicsView):
             for item in self.scene().items():
                 if isinstance(item, (APINode, CsvDataNode, DataProcessNode, ContainerNode,
                                      StepperNode, SiteParserNode, ClassNode, ImageNode,
-                                     ConnectionPath)) or type(item).__name__ == 'PortNode':
+                                     ConnectionPath)) or type(item).__name__ in ('PortNode', 'SwitchNode'):
                     item.setSelected(True)
             event.accept()
         elif event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier):
@@ -8073,7 +8257,7 @@ class NodeView(QGraphicsView):
     def _find_port_at(self, scene_pos):
         """查找场景位置对应的端口，返回 (port_fn, obj, param_name_or_None)"""
         for item in self.scene().items():
-            if type(item).__name__ == 'PortNode':
+            if type(item).__name__ in ('PortNode', 'SwitchNode'):
                 best, best_d = None, 15
                 for nm in item.input_names():
                     p = item.input_port(nm)
@@ -8086,7 +8270,7 @@ class NodeView(QGraphicsView):
                     d = (p - scene_pos).manhattanLength()
                     if d < best_d:
                         best_d = d
-                        best = (lambda n=item, k=nm: n.output_port(k), item, k)
+                        best = (lambda n=item, k=nm: n.output_port(k), item, nm)
                 if best:
                     return best
             if isinstance(item, APINode):
@@ -8174,7 +8358,7 @@ class NodeView(QGraphicsView):
                                  StepperNode, SiteParserNode, ClassNode, ImageNode,
                                  ConnectionPath)):
                 return True
-            if type(item).__name__ == 'PortNode':
+            if type(item).__name__ in ('PortNode', 'SwitchNode'):
                 return True
         return False
 
@@ -8237,6 +8421,8 @@ class NodeView(QGraphicsView):
         for cls, fname in _NODE_HOVER_SVG:
             if isinstance(item, cls):
                 return fname
+        if type(item).__name__ == 'SwitchNode':
+            return 'switch_node.svg'
         return None
 
     # ---------- 悬停提示的端口清单 ----------
@@ -8387,6 +8573,22 @@ class NodeView(QGraphicsView):
             add('out', C['class_out'], '触发输出',
                 f"{len(getattr(item, '_members', None) or [])} 个成员", item.outputPort)
 
+        elif type(item).__name__ == 'SwitchNode':
+            ins = getattr(item, 'inputs', {}) or {}
+            outs = getattr(item, 'outputs', {}) or {}
+            for key in ('in1', 'in2', 'data'):
+                if key not in ins:
+                    continue
+                val = ins.get(key)
+                shown = '（等数据）' if val is None else _hover_fit_text(str(val), 46)
+                add('in', C['input'], key, shown,
+                    (lambda k=key, it=item: it.input_port(k)))
+            for key in ('OUT', 'data'):
+                val = outs.get(key)
+                shown = '（未产生）' if val is None else _hover_fit_text(str(val), 46)
+                add('out', C['output'], key, shown,
+                    (lambda k=key, it=item: it.output_port(k)))
+
         elif isinstance(item, ImageNode):
             rows.append({'side': 'note', 'color': C['note'], 'key': '无端口',
                          'value': '图片节点是参考元素，不参与连线', 'y': None})
@@ -8444,7 +8646,7 @@ class NodeView(QGraphicsView):
 
         # 带注释的端口行下面再挂一行小字（图源配置「注释」列）。
         # 为什么不让注释跟在值后面：一行里「键 + 值 + 注释」在 440px 宽度下根本放不下
-        # （例：creator_id = 102465161 ——作者唯一标识符ID ≈ 242px，可用只有 178px），
+        # （例：creator_id = 102465161 ——分组唯一标识符ID ≈ 242px，可用只有 178px），
         # 硬塞只会把注释截成两三个字。所以注释独占一行，只有带注释的行才加高。
         note_h = max(11, int(row_h * 0.78))
         row_heights = []
@@ -8545,7 +8747,14 @@ class NodeView(QGraphicsView):
     def _fill_svg(self, svg, item):
         """把 SVG 中的 {{token}} 替换为元素框的真实信息（类框除外，保持静态）。"""
         tok = {}
-        if isinstance(item, APINode):
+        if type(item).__name__ == 'SwitchNode':
+            outs = getattr(item, 'outputs', {}) or {}
+            ins = getattr(item, 'inputs', {}) or {}
+            mode = getattr(item, 'mode', 'AND')
+            tok['name'] = _hover_escape(getattr(item, 'label', '逻辑门') or '逻辑门')
+            tok['mode'] = _hover_escape(_GATE_MODE_CN.get(mode, mode))
+            tok['result'] = _hover_escape(outs.get('OUT') or '等待数据')
+        elif isinstance(item, APINode):
             method = getattr(item, 'method', None) or 'GET'
             url = getattr(item, 'url_path', None) or '/'
             # 请求入口来源：api_ref.base_url（图源入口地址），旧节点无则回退 (未设置)
@@ -8944,7 +9153,7 @@ class NodeView(QGraphicsView):
                     if isinstance(item, (APINode, DataProcessNode, CsvDataNode,
                                          ContainerNode, StepperNode, SiteParserNode,
                                          ClassNode, ImageNode)) or \
-                            type(item).__name__ == 'PortNode':
+                            type(item).__name__ in ('PortNode', 'SwitchNode'):
                         if rubber_scene_rect.contains(item.sceneBoundingRect()):
                             item.setSelected(True)
                     elif isinstance(item, ConnectionPath):
@@ -8959,7 +9168,7 @@ class NodeView(QGraphicsView):
                                  if isinstance(it, (APINode, DataProcessNode, CsvDataNode,
                                                     ContainerNode, StepperNode,
                                                     SiteParserNode, ImageNode))
-                                 or type(it).__name__ == 'PortNode']
+                                 or type(it).__name__ in ('PortNode', 'SwitchNode')]
                     if sel_nodes:
                         self.scene().create_class_from_nodes(sel_nodes)
             self._rubber_band_origin = None
@@ -10203,6 +10412,13 @@ class FlowEditorDialog(QDialog):
 
         # 断点状态按钮：红点 = 已开启断点；点一下打开断点/报文面板
         self.btn_breakpoints = QToolButton()
+        # 断点数量一变就刷新按钮（比在红点 lambda 里刷新更可靠：
+        # set_breakpoint 内部会再次触发 toggled，lambda 里读到的可能是中间状态）
+        try:
+            from portpanel.ui.debug.bridge import get_bridge as _gb
+            _gb().armedChanged.connect(lambda _n: self._refresh_breakpoint_btn())
+        except Exception:
+            pass
         self.btn_breakpoints.setText("○ 断点 0")
         self.btn_breakpoints.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.btn_breakpoints.setToolTip("已开启的断点数量；点击打开断点/实时报文面板")
@@ -10210,7 +10426,7 @@ class FlowEditorDialog(QDialog):
             "QToolButton { background:transparent; color:#e0a0a0;"
             "border:1px solid #5a3a3a; border-radius:3px; padding:4px 8px;"
             "font-size:11px; } QToolButton:hover { background:#3a1e1e; }")
-        self.btn_breakpoints.clicked.connect(self._open_debug_panel)
+        self.btn_breakpoints.clicked.connect(self._on_breakpoints_clicked)
         tb.addWidget(self.btn_breakpoints)
 
         # ---- 轮询参数：**横向折叠**（默认收起）----
@@ -10335,6 +10551,13 @@ class FlowEditorDialog(QDialog):
         self.btn_port_console.setStyleSheet(
             'QPushButton { background:#3a4a5e; color:white; border-radius:4px;'
             ' padding:6px 14px; font-weight:bold; } QPushButton:hover { background:#4a5d75; }')
+        self.btn_add_switch = QPushButton('🔀 开关')
+        self.btn_add_switch.setToolTip('新增逻辑开关节点：关闭后其下游整条支路本轮跳过')
+        self.btn_add_switch.setStyleSheet(
+            'QPushButton { background:#2a6a5a; color:white; border-radius:4px;'
+            ' padding:6px 12px; font-weight:bold; } QPushButton:hover { background:#35806c; }')
+        self.btn_add_switch.clicked.connect(self._on_switch_menu_clicked)
+        tb.addWidget(self.btn_add_switch)
         self.btn_port_console.clicked.connect(self._open_port_console)
         tb.addWidget(self.btn_port_console)
         self.btn_sync_cfg = QPushButton('⬆ 同步到图源配置')
@@ -10745,6 +10968,31 @@ class FlowEditorDialog(QDialog):
         center = self.view.mapToScene(self.view.viewport().rect().center())
         node.setPos(center.x() - node.rect().width()/2, center.y() - node.rect().height()/2)
 
+    def _on_switch_menu_clicked(self):
+        """工具栏「开关」→ 弹三选一：与门 / 非门 / 异或门。"""
+        from PySide6.QtWidgets import QMenu
+        btn = self.btn_add_switch
+        menu = QMenu(btn)
+        for mode, text in (('AND', '与门 AND  —  in1 且 in2 都为 true'),
+                           ('NOT', '非门 NOT  —  in1 为 false'),
+                           ('XOR', '异或门 XOR —  in1、in2 一真一假')):
+            act = menu.addAction(text)
+            act.triggered.connect(lambda _=False, m=mode: self._on_add_switch_node(m))
+        menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
+
+    def _on_add_switch_node(self, mode='AND'):
+        from portpanel.ui.switch_node import SwitchNode
+        node = SwitchNode(mode=mode)
+        self.scene.add_node(node)
+        center = self.view.mapToScene(self.view.viewport().rect().center())
+        node.setPos(center.x() - node.rect().width() / 2,
+                    center.y() - node.rect().height() / 2 - 40)
+        self.scene.clearSelection()
+        node.setSelected(True)
+        self.api_log_text.append('🔀 已添加逻辑门[%s]（左侧 in1/in2 接 true/false，'
+                                 'data 接放行数据）' % mode)
+        return node
+
     def _on_add_port_node(self, proto='modbus'):
         """工具栏 → 在画布中心放一个端口节点（Modbus / PROFINET / WebSocket）。"""
         from portpanel.ui.port_node import PortNode
@@ -10828,6 +11076,52 @@ class FlowEditorDialog(QDialog):
                     dlg.deleteLater()
                 except Exception:
                     pass
+
+    def _start_port_nodes(self):
+        """执行开始 → 所有端口节点进入持续监听（已运行的保持不动）。"""
+        started = 0
+        for n in list(self.scene.nodes):
+            if type(n).__name__ != 'PortNode':
+                continue
+            if n.is_running():
+                continue
+            try:
+                if n.start():
+                    started += 1
+                    self.api_log_text.append(
+                        '  🔌 端口 [%s] 持续监听 :%d（消息池已就绪）'
+                        % (n.name, n.listen_port))
+            except Exception as exc:
+                self.api_log_text.append('  ⚠ 端口 [%s] 启动失败：%s' % (n.name, exc))
+        return started
+
+    def _heartbeat_push(self, port_node, msg):
+        """心跳回调（主线程）：把池里最新一条推进下游 POST 节点。"""
+        try:
+            targets = [c.end_obj for c in self.scene.connections
+                       if c.start_obj is port_node and isinstance(c.end_obj, APINode)]
+        except Exception:
+            targets = []
+        targets = [t for t in targets if t.is_terminal()]
+        if not targets:
+            port_node._hb_logs.append('下游没有 POST/PUT 节点，消息只留在池里')
+            return False
+        vals = msg.values() if hasattr(msg, 'values') else []
+        ok_any = False
+        for api in targets:
+            try:
+                for i, p in enumerate(api.params or []):
+                    if i < len(vals):
+                        p['value'] = str(vals[i])
+                self.api_log_text.append(
+                    '  💓 [%s] 推送 #%d → %s %s %s'
+                    % (port_node.name, getattr(msg, 'seq', 0), api.method,
+                       api.url_path, (msg.summary() if hasattr(msg, 'summary') else '')[:60]))
+                self._execute_api_node(api, 0)
+                ok_any = True
+            except Exception as exc:
+                self.api_log_text.append('  ⚠ 心跳推送失败：%s' % str(exc)[:80])
+        return ok_any
 
     def _open_port_console(self):
         from portpanel.ui.port_console import PortConsole
@@ -11186,7 +11480,7 @@ class FlowEditorDialog(QDialog):
         # 编辑器还没有画布渲染。**直接拒绝加载**，避免「静默丢节点 + 覆盖保存」。
         _known = {'APINode', 'CsvDataNode', 'DataProcessNode', 'ContainerNode',
                   'StepperNode', 'SiteParserNode', 'ImageNode', 'ClassNode',
-                  'PortNode'}
+                  'PortNode', 'SwitchNode'}
         _unknown = sorted({str(n.get('type')) for n in (data.get('nodes') or [])
                            if str(n.get('type')) not in _known})
         if _unknown:
@@ -12186,6 +12480,7 @@ class FlowEditorDialog(QDialog):
                     'body_kind': getattr(node, 'body_kind', 'none'),
                     'result_json': node.result_json,
                     'api_ref': node.api_ref,
+                    'paginate': getattr(node, 'paginate', None),
                     'concat_widgets': [
                         {'id': cw.concat_id, 'value': cw.get_value(),
                          'source_path': cw.source_path,
@@ -12194,6 +12489,8 @@ class FlowEditorDialog(QDialog):
                     ],
                 })
             elif type(node).__name__ == 'PortNode':
+                nd.update(node.to_dict())
+            elif type(node).__name__ == 'SwitchNode':
                 nd.update(node.to_dict())
             elif isinstance(node, CsvDataNode):
                 nd.update({
@@ -12210,6 +12507,7 @@ class FlowEditorDialog(QDialog):
                     'replacement': node.replace_edit.text() if hasattr(node, 'replace_edit') and node.replace_edit else '',
                     'source_data': node.source_data,
                     'processed_data': node.processed_data,
+                    'key_by': getattr(node, 'key_by', ''),
                     'source_path': getattr(node, 'source_path', ''),
                     'csv_source_file': node._csv_source[0].file_path if node._csv_source else None,
                     'csv_source_header': node._csv_source[1] if node._csv_source else None,
@@ -12221,6 +12519,7 @@ class FlowEditorDialog(QDialog):
                     'total_files': node.total_files,
                     'rule_enabled': node._rule_enabled,
                     'rule_creation_path': node._rule_creation_path,
+                    'rule_fallback_path': getattr(node, '_rule_fallback_path', ''),
                     'rule_time_enabled': node._rule_time_enabled,
                     'rule_time_format': node._rule_time_format,
                     'rule_parts': [dict(pd) for pd in node._rule_parts],
@@ -12528,6 +12827,7 @@ class FlowEditorDialog(QDialog):
                     'total_files': node.total_files,
                     'rule_enabled': node._rule_enabled,
                     'rule_creation_path': node._rule_creation_path,
+                    'rule_fallback_path': getattr(node, '_rule_fallback_path', ''),
                     'rule_time_enabled': node._rule_time_enabled,
                     'rule_time_format': node._rule_time_format,
                     'rule_parts': [dict(pd) for pd in node._rule_parts],
@@ -12676,9 +12976,21 @@ class FlowEditorDialog(QDialog):
         """反序列化单节点，校验数据文件是否存在"""
         typ = ndata.get('type', '')
         try:
+            # ---- 插件优先（additive）：注册了 factory 的类型由插件创建；
+            # 只登记元信息的插件返回 None，继续走下面的老分支，行为不变。
+            try:
+                from portpanel.ui.nodes import REGISTRY as _NODE_REGISTRY
+                _node = _NODE_REGISTRY.create(typ, ndata)
+                if _node is not None:
+                    return _node
+            except Exception:
+                pass
             if typ == 'PortNode':
                 from portpanel.ui.port_node import PortNode
                 return PortNode.from_dict(ndata)
+            if typ == 'SwitchNode':
+                from portpanel.ui.switch_node import SwitchNode
+                return SwitchNode.from_dict(ndata)
             if typ == 'APINode':
                 params = ndata.get('params', [])
                 node = APINode()
@@ -12692,6 +13004,7 @@ class FlowEditorDialog(QDialog):
                 node.body_kind = (ndata.get('body_kind')
                                   or infer_body_kind(node.body, node.headers))
                 node.result_json = ndata.get('result_json')
+                node.paginate = ndata.get('paginate') or None
                 return node
             elif typ == 'CsvDataNode':
                 fp = ndata.get('file_path', '')
@@ -12719,6 +13032,7 @@ class FlowEditorDialog(QDialog):
                     node.replace_edit.setText(ndata.get('replacement', ''))
                 node.apply_regex()
                 # 恢复上次保存的处理结果（供右侧"数据处理"历史记录显示）
+                node.key_by = ndata.get('key_by', '') or ''
                 saved_proc = ndata.get('processed_data')
                 if saved_proc is not None:
                     node.processed_data = saved_proc
@@ -12731,6 +13045,7 @@ class FlowEditorDialog(QDialog):
                 node.total_files = ndata.get('total_files', 0)
                 node._rule_enabled = bool(ndata.get('rule_enabled', False))
                 node._rule_creation_path = ndata.get('rule_creation_path', '')
+                node._rule_fallback_path = ndata.get('rule_fallback_path', '')
                 node._rule_time_enabled = bool(ndata.get('rule_time_enabled', False))
                 node._rule_time_format = ndata.get('rule_time_format', 'yyyy-mm-dd')
                 node._rule_parts = [dict(p) for p in ndata.get('rule_parts', [])]
@@ -12835,6 +13150,13 @@ class FlowEditorDialog(QDialog):
         返回 (ready, reason)。不满足时调用方跳过本节点，并由 skipped 集合
         把"本轮没跑"继续传给它的下游，避免下游拿着上一轮的数据继续跑。
         """
+        try:
+            from portpanel.ui.switch_node import blocked_by_switch
+            _off, _why = blocked_by_switch(node, self.scene.connections)
+            if _off:
+                return False, _why
+        except Exception:
+            pass
         apis, csvs, _st = self._collect_upstream_sources(node, include_self=False)
         # ① 上游接口本轮被跳过 → 本节点数据必然没更新
         for up in apis:
@@ -13205,6 +13527,7 @@ class FlowEditorDialog(QDialog):
                 rule_config = {
                     'enabled': True,
                     'creation_path': getattr(container, '_rule_creation_path', '') or '',
+                'fallback_path': getattr(container, '_rule_fallback_path', '') or '',
                     'time_enabled': bool(getattr(container, '_rule_time_enabled', False)),
                     'time_format': getattr(container, '_rule_time_format', 'yyyy-mm-dd'),
                     'parts': [
@@ -13363,7 +13686,9 @@ class FlowEditorDialog(QDialog):
         for part in path[2:].split('.'):
             if '[' in part and part.endswith(']'):
                 name, idx_str = part[:-1].split('[')
-                segments.append((name, int(idx_str)))
+                # [*] = 该数组的任意元素；通配展开交给 _resolve_path_generalized，
+                # 这里用 0 作为占位索引，否则 int('*') 会直接抛 ValueError
+                segments.append((name, 0 if idx_str.strip() == '*' else int(idx_str)))
             else:
                 segments.append((part, None))
         return segments
@@ -13473,7 +13798,7 @@ class FlowEditorDialog(QDialog):
 
         - 拍平项本身是 dict（$.items[0]、$.groups[0].items[0]）→ 该项自身
         - 拍平项是标量（如 $.[0].attachments.[0].path 拍平成路径字符串）→ 返回其
-          所属最外层数组元素 dict（帖子）：同一帖子的多个附件落到同一文件夹，
+          所属最外层数组元素 dict（条目）：同一条目的多个附件落到同一文件夹，
           且与下载索引一一对应，不再因外层数组长度与拍平长度不同而取模错位
         - 找不到 dict → None（调用方回退 result_json / 参数值）
         """
@@ -13557,6 +13882,13 @@ class FlowEditorDialog(QDialog):
                     # 一样按全量数组项逐项内轮询下载。
                     self._resolve_concat_array_values(api, pname, dp_mid, resp_data, dbg)
                     continue
+                if dp_mid is not None and getattr(dp_mid, 'key_by', '') and                         getattr(dp_mid, '_keyed', None):
+                    _keys = api._array_values.get(dp_mid.key_by) or []
+                    if _keys:
+                        api._array_values[pname] = [
+                            str(dp_mid._keyed.get(str(k), '')) for k in _keys]
+                        dbg.append(f"  参数[{pname}] 游标按 {dp_mid.key_by} 分桶: {len(_keys)} 桶")
+                        continue
                 if pname and pname in api.param_widgets:
                     pw = api.param_widgets[pname]
                     src = getattr(pw, 'source_path', '')
@@ -13597,8 +13929,8 @@ class FlowEditorDialog(QDialog):
                             # 拍平列表）一一对应的“命名数据”，保证文件夹与下载项索引对齐：
                             #   - 拍平项是 dict（$.items[0]、$.groups[0].items[0]）→ 该项本身
                             #   - 拍平项是标量（如 $.[0].attachments.[0].path 拍平成路径
-                            #     字符串）→ 其所属最外层数组元素 dict（帖子），
-                            #     使同一帖子的多个附件都落到同一文件夹且不与下载错位
+                            #     字符串）→ 其所属最外层数组元素 dict（条目），
+                            #     使同一条目的多个附件都落到同一文件夹且不与下载错位
                             src_list = self._resolve_leaf_naming_data(resp_data, segments)
                             # 调试：若外层源数组与迭代数组不一致（嵌套数组），打印差异
                             outer = resp_data if isinstance(resp_data, list) \
@@ -13610,10 +13942,10 @@ class FlowEditorDialog(QDialog):
                             if isinstance(src_list, list) and src_list:
                                 # 源数据列表必须与【当前响应】对齐：每轮都刷新。
                                 # 旧逻辑仅在 len(all_vals) >= 上一轮长度 时更新，
-                                # 轮次变少时（如封面 50→47 项、附件 236→109 项）会
-                                # 保留上一轮的帖子列表，使 _build_rule_data 的文件夹名
-                                # 与 _current_source_key 的清单主键解析到上一轮帖子，
-                                # 文件落入旧帖子命名的文件夹（错位）。
+                                # 轮次变少时（如媒体 50→47 项、附件 236→109 项）会
+                                # 保留上一轮的条目列表，使 _build_rule_data 的文件夹名
+                                # 与 _current_source_key 的清单主键解析到上一轮条目，
+                                # 文件落入旧条目命名的文件夹（错位）。
                                 # 多个数组参数时，取【当前响应内】最大源列表为准
                                 # （与 max_inner 轮询项数对齐）；跨响应一律以本次为准。
                                 gen = self._resolve_generation
@@ -13905,7 +14237,11 @@ class FlowEditorDialog(QDialog):
             # ---- 1) 优先使用 DP 处理后的值（正则在 DP 中已应用） ----
             # 手动输入的主参数视为「锁定值」（常态保持存在）：即使残留 DP 直连也不覆盖；
             # DP/CSV 动态内容应通过拼合栏承载（连线时已自动引导过去）。
-            if pname in dp_values and not _api_param_is_manual_input(node, pname):
+            # DP 直连值优先；但**空串不算有效值** —— 否则会盖掉后面的「数组索引」分支：
+            # 上游 DP 只拿到单个 source_data（往往是空），而真实的多值在 _array_values 里，
+            # 结果就是参数永远是空的（单帖 JSON 的 id 就是这么丢的）。
+            if (pname in dp_values and dp_values[pname] not in (None, '')
+                    and not _api_param_is_manual_input(node, pname)):
                 val = dp_values[pname]
                 values[pname] = val
                 p['value'] = val
@@ -13950,8 +14286,66 @@ class FlowEditorDialog(QDialog):
                     else:
                         url_path += '/' + v
                 self.api_log_text.append(f"🔗 拼合值: {' / '.join(cleaned)}")
+        # ② 参数值内部的 {name} 模板替换（如 query="host_mid={mid}&offset={offset}"）：
+        #    用同一节点的 values 相互展开，跑两遍支持链式引用（signer 先用 mid，
+        #    再喂给下游）。
+        try:
+            import re as _re
+
+            def _expand(txt, table):
+                if not isinstance(txt, str) or '{' not in txt:
+                    return txt
+                return _re.sub(r'\{([A-Za-z_][A-Za-z0-9_]*)\}',
+                               lambda m: str(table.get(m.group(1), m.group(0))), txt)
+
+            for _ in range(2):
+                for _k in list(values.keys()):
+                    values[_k] = _expand(values[_k], values)
+        except Exception:
+            pass
+
+        # ③ 数值归一：步进器输出 1.0 / 2.0 这类整数浮点去掉尾巴，
+        #    否则 B 站 pn=1.0 会直接 -400。
+        try:
+            for _k, _v in list(values.items()):
+                if isinstance(_v, str) and _v.endswith('.0') and _v[:-2].lstrip('-').isdigit():
+                    values[_k] = _v[:-2]
+        except Exception:
+            pass
+
+        # 参数值里的 ${ENV:NAME} 也走同一套解析（环境变量 → data/secrets.local.json）
+        try:
+            from portpanel.ui.image_source import _ENV_PLACEHOLDER_RE, _secret_value
+            for _k, _v in list(values.items()):
+                _m = _ENV_PLACEHOLDER_RE.match(str(_v).strip())
+                if _m:
+                    _n = _m.group(1)
+                    values[_k] = os.environ.get(_n) or _secret_value(_n) or ''
+        except Exception:
+            pass
+
         full_url = node.api_ref.get('base_url', '') + url_path
+        # location=query 的参数要拼进查询串：老实现只做 {占位符} 替换，
+        # 声明为 query 的参数会被静默丢掉（vmid/pn/ps 全丢 → 目标站点 -400）。
+        try:
+            from urllib.parse import quote, urlencode
+            _extra = [(p['name'], str(values.get(p['name'], '')))
+                      for p in node.params
+                      if str(p.get('location') or 'path') == 'query'
+                      and ('{%s}' % p['name']) not in url_path]
+            if _extra:
+                full_url += ('&' if '?' in full_url else '?') + urlencode(
+                    _extra, quote_via=quote)
+        except Exception:
+            pass
         method = node.method.upper()
+
+        # 空值守卫要在「打印请求头」之前：这段打印就在本函数里，
+        # 判定晚于它就会出现「日志写着 GET None、其实没发出去」的假象。
+        _raw_u = str(full_url or '').strip()
+        if ((not _raw_u) or _raw_u.lower() in ('none', 'null')
+                or '/None' in _raw_u or '/null' in _raw_u):
+            return None, method, values
 
         round_tag = f" [第{round_index}轮]" if round_index else ""
         req_header = f"{'='*60}\n▶ 请求{round_tag}: {method} {full_url}\n{'='*60}"
@@ -13963,6 +14357,16 @@ class FlowEditorDialog(QDialog):
         if _mh:
             # 只打键名与打码后的值，绝不把 Cookie/Token 原样写进日志
             self.api_log_text.append(f"请求头: {describe_headers(_mh)}")
+        # ---- 空值守卫 ----
+        # cover 为 null 时，参数会被拼成字符串 "None"，最终请求成 GET None
+        # （curl 报 Could not resolve host: None）。这类条目本来就是「无内容」，
+        # 统一判定为跳过：返回 None，由调用方记账并略过，不发请求、不占下载队列。
+        try:
+            _u = str(full_url or '').strip()
+            if (not _u) or _u.lower() in ('none', 'null') or '/None' in _u or '/null' in _u:
+                return None, method, values
+        except Exception:
+            pass
         return full_url, method, values
 
     def _execute_api_node(self, node, round_index, progress_cb=None):
@@ -13971,6 +14375,9 @@ class FlowEditorDialog(QDialog):
             return None            # 端口节点由自己的启停驱动，不参与 API 执行
         self._round_executed = getattr(self, '_round_executed', 0) + 1
         full_url, method, _values = self._compute_api_url(node, round_index)
+        if full_url is None:
+            self.api_log_text.append('  ⏭ 跳过（参数为空，无内容可请求）')
+            return None
         # 节点级自定义请求头：${ENV:VAR} 取环境变量，${DATE:时区} 现取当前时间。
         # 空值 = 显式不发该头（可用来屏蔽内置默认 UA）。
         node_headers, missing_env, dyn_notes = resolve_header_placeholders(
@@ -14015,6 +14422,19 @@ class FlowEditorDialog(QDialog):
             dl_result, is_tmp, used_curl, err, content_type = self._threaded_request(
                 method, full_url, timeout=self._run_transfer().api_timeout_tuple,
                 progress_cb=progress_cb, headers=node_headers)
+
+
+        # 逻辑门取数：记录本次响应正文（截断），供 in1/in2 判断 true/false
+        try:
+            import os as _os
+            if dl_result and _os.path.exists(str(dl_result)):
+                with open(str(dl_result), 'rb') as _f:
+                    node._last_body_text = _f.read(4096).decode('utf-8', 'replace')
+            else:
+                node._last_body_text = None
+        except Exception:
+            node._last_body_text = None
+
         try:
             return self._process_api_result(
                 node, full_url, method, round_index,
@@ -14039,6 +14459,32 @@ class FlowEditorDialog(QDialog):
                     pass
             self._debug_active = False
 
+    @staticmethod
+    def _risk_signature(resp):
+        """返回限流特征字符串；没命中返回 ''。只看 4 类证据，不做猜测。"""
+        try:
+            st = int(getattr(resp, 'status_code', 200) or 200)
+            if st in (412, 429):
+                return 'HTTP %d' % st
+            hdrs = {str(k).lower(): str(v)
+                    for k, v in (getattr(resp, 'headers', {}) or {}).items()}
+            bs = hdrs.get('bili-status-code', '').strip()
+            if bs in ('-352', '-412'):
+                return 'Bili-Status-Code %s' % bs
+            body = getattr(resp, 'content', b'') or b''
+            txt = body.decode('utf-8', 'ignore') if isinstance(body, (bytes, bytearray)) else str(body)
+            head = txt[:4000]
+            for code in ('-352', '-412'):
+                if '"code": %s' % code in head or '"code":%s' % code in head:
+                    return 'code=%s' % code
+            low = head.lower()
+            for kw in ('限流', '请求过于频繁', 'too many requests'):
+                if kw.lower() in low:
+                    return '响应含「%s」' % kw
+        except Exception:
+            pass
+        return ''
+
     def _process_api_result(self, node, full_url, method, round_index,
                             dl_result, is_tmp, used_curl, err, content_type,
                             progress_cb=None, bl=None, dl_progress=None,
@@ -14048,6 +14494,90 @@ class FlowEditorDialog(QDialog):
         批量并行模式可预创建输出块后传入 bl / dl_progress（实时进度）。
         item_index：数组轮询时的当前项索引（用于规则模式解析当前轮询数据）。
         """
+        # ---- 接口节流：每个请求处理完后按「接口请求间隔」歇一下 ----
+        try:
+            _iv = float(getattr(getattr(self, '_run_cfg', None), 'api_interval', 0.0) or 0.0)
+            # 只给「接口（JSON/HTML）」限速；图片/视频这类媒体文件不限速，
+            # 否则 20 张媒体 × 3 秒 = 一分钟才下一批，看起来就像没落盘。
+            _ct = str(content_type or '').lower()
+            _is_media = (_ct.startswith('image/') or _ct.startswith('video/')
+                         or _ct.startswith('audio/') or 'octet-stream' in _ct)
+            if _is_media:
+                _iv = 0.0
+            if _iv > 0 and not getattr(self, '_inner_cancel', False):
+                self.api_log_text.append('  ⏱ 接口间隔 %.1fs' % _iv)
+                # 必须走可中断等待：它内部会 processEvents，
+                # 直接用 time.sleep 会把 UI 线程连同画面一起冻住。
+                self._wait_interruptible(_iv)
+        except Exception:
+            pass
+
+        # ---- 限流特征识别 → 冷却 → 重试/熔断 ----
+        # 特征（任一命中即算）：
+        #   HTTP 412 / 429
+        #   响应头 Bili-Status-Code = -352 / -412
+        #   body 里 code = -352 / -412
+        #   body 里出现“限流 / 请求过于频繁 / too many requests”
+        try:
+            _cfg = getattr(self, '_run_cfg', None)
+            _cd = float(getattr(_cfg, 'cooldown_sec', 0.0) or 0.0)
+            _rty = int(getattr(_cfg, 'risk_retries', 0) or 0)
+            _why = self._risk_signature(dl_result)
+            if _why:
+                self._risk_hits = getattr(self, '_risk_hits', 0) + 1
+                self.api_log_text.append(
+                    '  🛡 命中限流：%s（连续第 %d 次，重试上限 %d，冷却 %.0fs）'
+                    % (_why, self._risk_hits, _rty, _cd))
+                if _cd > 0 and not getattr(self, '_inner_cancel', False):
+                    self._wait_interruptible(_cd)
+                if self._risk_hits > _rty:
+                    self._inner_cancel = True
+                    self.api_log_text.append(
+                        '  ⛔ 连续限流已超过重试上限 %d 次，停止流程（请调大接口间隔/冷却）' % _rty)
+            else:
+                self._risk_hits = 0
+        except Exception:
+            pass
+
+        # ---- key_by 游标：每个元素返回时按“当前元素”写回（每用户各记各的 offset） ----
+        # 放在这里的原因：探针实测 _process_api_result 每个请求都会走（27/27），
+        # 而 _execute_api_node 每轮只走一次（5 次），所以“谁知道当前是第几个用户”
+        # 只有这里是准的。
+        try:
+            import json as _jk
+            from portpanel.engine.pagination import get_path as _gpk
+
+            for _c in list(getattr(self.scene, 'connections', []) or []):
+                if getattr(_c, 'start_obj', None) is not node:
+                    continue
+                _dp = getattr(_c, 'end_obj', None)
+                if _dp is None:
+                    continue
+                _kb = getattr(_dp, 'key_by', '') or ''
+                _path = getattr(_dp, 'source_path', '') or ''
+                if not _kb or not _path.startswith('$.'):
+                    continue
+                try:
+                    _payload = _jk.loads(getattr(dl_result, 'content', b'') or b'{}')
+                except Exception as _e:
+                    self.api_log_text.append('  ⚠ 游标解析失败(JSON): %s' % str(_e)[:60])
+                    continue
+                _val = _gpk(_payload, _path, '')
+                _kv = getattr(node, '_array_values', {}).get(_kb) or []
+                _ki = item_index if item_index is not None else getattr(
+                    node, '_array_index', {}).get(_kb, 0)
+                try:
+                    _ki = int(_ki)
+                except Exception:
+                    _ki = 0
+                if _val in ('', None) or not _kv:
+                    continue
+                if 0 <= _ki < len(_kv):
+                    _dp._keyed[str(_kv[_ki])] = str(_val)
+                    self.api_log_text.append(
+                        '  🔖 游标入库 %s=%s → %s' % (_kb, _kv[_ki], str(_val)[:18]))
+        except Exception as _exc:
+            self.api_log_text.append('  ⚠ 游标写回异常: %s' % str(_exc)[:80])
         content_type = content_type or ""
         raw_content = None
         tmp_path = None
@@ -14232,6 +14762,28 @@ class FlowEditorDialog(QDialog):
                 container = conn.end_obj
                 break
 
+        # JSON 错误包（{"code": -352} 之类）不落盘：接口失败时存下来的只会是垃圾文件，
+        # 还会让「每个条目一个 json」的目录里混进 -101/-352 这种伪分组目录。
+        if container is not None:
+            try:
+                if raw_content is not None:
+                    _head = (raw_content if isinstance(raw_content, (bytes, bytearray))
+                             else str(raw_content).encode('utf-8', 'replace'))[:400]
+                elif tmp_path:
+                    with open(tmp_path, 'rb') as _f:
+                        _head = _f.read(400)
+                else:
+                    _head = b''
+                if _head.lstrip()[:1] == b'{':
+                    import json as _json
+                    _j = _json.loads(_head.decode('utf-8', 'replace'))
+                    if isinstance(_j, dict) and _j.get('code') not in (None, 0):
+                        self.api_log_text.append(
+                            f"  ⏸ 跳过存盘：响应是错误包 code={_j.get('code')}")
+                        container = None
+            except Exception:
+                pass
+
         if container is not None:
             # 下载失败/空响应：没有可存的内容，直接跳过存盘（不再制造「存储失败」并终止整条流程）。
             if tmp_path is None and raw_content is None:
@@ -14305,6 +14857,13 @@ class FlowEditorDialog(QDialog):
                 idx = idx % len(src_list)
                 item = src_list[idx]
                 if isinstance(item, dict):
+                    # 源列表项本身也可能是整段响应（{"items":[...]}）：
+                    # 再钻一层，拿到「这一条」，规则里的 $.content 才解析得到。
+                    _it = item.get('items')
+                    if isinstance(_it, list) and _it:
+                        _j = idx % len(_it)
+                        if isinstance(_it[_j], dict):
+                            return _it[_j]
                     return item
             # 其次：最近响应是列表（原始数据源）时，取当前项作为规则解析数据，
             # 使规则里的 $.title / $.file.name 等路径能按该项解析。
@@ -14327,10 +14886,31 @@ class FlowEditorDialog(QDialog):
                 return rd
         rj = getattr(node, 'result_json', None)
         if isinstance(rj, dict) and '_binary' not in rj:
+            # 响应形如 {"items": [...]}（或 {"data": {"items": [...]}}）时，
+            # 按当前项索引取「这一条」，规则里的 $.content / $.opus_id 才能解析成该条目的值；
+            # 否则规则会拿到整个响应，标题永远解析不出来（只剩日期）。
+            for _holder in (rj, rj.get('data') if isinstance(rj.get('data'), dict) else None):
+                if not isinstance(_holder, dict):
+                    continue
+                _items = _holder.get('items')
+                if isinstance(_items, list) and _items:
+                    _i = (item_index if item_index is not None else 0) % len(_items)
+                    if isinstance(_items[_i], dict):
+                        return _items[_i]
             return rj
         if isinstance(rj, list) and rj:
             return rj[0]
         if isinstance(data, dict) and '_binary' not in data:
+            # 兜底同样按「当前项」取：data 往往是 {"items":[...]} 这种整段响应，
+            # 直接返回它会让规则里的 $.content 永远解析不到（只剩日期）。
+            for _holder in (data, data.get('data') if isinstance(data.get('data'), dict) else None):
+                if not isinstance(_holder, dict):
+                    continue
+                _items = _holder.get('items')
+                if isinstance(_items, list) and _items:
+                    _i = (item_index if item_index is not None else 0) % len(_items)
+                    if isinstance(_items[_i], dict):
+                        return _items[_i]
             return data
         return None
 
@@ -14452,33 +15032,86 @@ class FlowEditorDialog(QDialog):
                         break
         return containers
 
+    def _dp_value_on_demand(self, dp):
+        """现场解析一个「只接了容器、没有 API 消费者」的数据处理框。
+
+        这类 DP 引擎不会主动跑（没有下游参数要填），processed_data 永远是空的；
+        但它上游的 API 节点是有响应的，于是这里按它的 source_path 现算一次。
+
+        通配路径（$.data.list[*].uname）会返回列表 —— 这时用**兄弟 DP** 的当前索引
+        （比如同样接在列表接口上的 dp_mid 正在处理第几个分组）取对应那一项，
+        不需要额外请求，也不会串行。
+        """
+        try:
+            path = getattr(dp, 'source_path', '') or ''
+            if not path.startswith('$.'):
+                return ''
+            for conn in self.scene.connections:
+                if not (conn.end_obj is dp and isinstance(conn.start_obj, APINode)):
+                    continue
+                api = conn.start_obj
+                rj = getattr(api, 'result_json', None)
+                if not isinstance(rj, (dict, list)):
+                    continue
+                val = _resolve_rule_json_value(rj, path)
+                if val is None:
+                    continue
+                if not isinstance(val, (dict, list)):
+                    return str(val)
+                if isinstance(val, list) and val:
+                    idx = 0
+                    for c2 in self.scene.connections:
+                        sib = getattr(c2, 'start_obj', None)
+                        if (getattr(c2, 'end_obj', None) is not None
+                                and isinstance(sib, DataProcessNode)
+                                and sib is not dp):
+                            for c3 in self.scene.connections:
+                                if c3.end_obj is sib and c3.start_obj is api:
+                                    ai = getattr(sib, '_array_index', {}) or {}
+                                    if ai:
+                                        idx = max(ai.values())
+                    idx %= len(val)
+                    item = val[idx]
+                    if not isinstance(item, (dict, list)):
+                        return str(item)
+        except Exception:
+            pass
+        return ''
+
     def _container_root_value(self, container):
         """解析容器框「根目录输入点」本轮该用的文件夹名。
 
-        返回 (名字, 就绪, 原因)。没有接输入点时返回 ('', True, '')（保持原行为）。
-        就绪判定复用轮询锁：上游本轮被跳过（或它自己的上游没就绪）→ 不就绪，
-        此时绝不用上一轮的老名字往磁盘里写。
+        按连线顺序取第一条**能产出名字**的 root 连线（昵称 → mid 兜底）；
+        全都没值时返回不就绪，宁可跳过也不写到错误的目录里。
         """
+        first_why = ''
         for conn in self.scene.connections:
-            if conn.end_obj is container and conn.end_param == 'root':
-                src = conn.start_obj
-                try:
-                    # _node_output_text 挂在 NodeScene 上（不是对话框），必须显式取 scene
-                    val = (self.scene._node_output_text(src, conn.start_param) or '').strip()
-                except Exception:
-                    val = ''
-                skip_set = getattr(self, '_round_skipped', None) or set()
-                if src in skip_set:
-                    return val, False, f"上游 {type(src).__name__} 本轮未执行（数据未更新）"
-                try:
-                    ready, why = self._node_round_gate(src, skip_set)
-                except Exception:
-                    ready, why = True, ''
-                if not ready:
-                    return val, False, why
-                if not val:
-                    return '', False, f"上游 {type(src).__name__} 本轮没有产出根目录名"
-                return val, True, ''
+            if not (conn.end_obj is container and conn.end_param == 'root'):
+                continue
+            src = conn.start_obj
+            try:
+                val = (self.scene._node_output_text(src, conn.start_param) or '').strip()
+            except Exception:
+                val = ''
+            if not val and isinstance(src, DataProcessNode):
+                val = self._dp_value_on_demand(src).strip()
+            skip_set = getattr(self, '_round_skipped', None) or set()
+            if src in skip_set:
+                first_why = first_why or f"上游 {type(src).__name__} 本轮未执行（数据未更新）"
+                continue
+            try:
+                ready, why = self._node_round_gate(src, skip_set)
+            except Exception:
+                ready, why = True, ''
+            if not ready:
+                first_why = first_why or why
+                continue
+            if not val:
+                first_why = first_why or f"上游 {type(src).__name__} 本轮没有产出根目录名"
+                continue
+            return val, True, ''
+        if first_why:
+            return '', False, first_why
         return '', True, ''
 
     def _manifest_root(self, container):
@@ -14510,6 +15143,11 @@ class FlowEditorDialog(QDialog):
         每个数组项对应一个文件夹（命名规则与存盘一致：创建时机值 + 文本拼合段），
         下载时文件按当前项解析出的规则名落入对应文件夹（存盘时 makedirs 幂等兜底）。
         """
+        # 预创建用「容器根目录」（= mid）建目录，而实际存盘会解析成分组昵称，
+        # 结果就是 <存储根>/<mid>/... 与 <存储根>/<昵称>/... 并存。
+        # 存盘时本身会 makedirs（幂等），预创建只省一点 I/O，这里直接关掉。
+        if not getattr(self, '_precreate_rule_dirs', False):
+            return
         containers = self._downstream_containers(node)
         if not containers:
             self.api_log_text.append(
@@ -14536,6 +15174,7 @@ class FlowEditorDialog(QDialog):
             rule_config = {
                 'enabled': True,
                 'creation_path': getattr(container, '_rule_creation_path', '') or '',
+                'fallback_path': getattr(container, '_rule_fallback_path', '') or '',
                 'time_enabled': bool(getattr(container, '_rule_time_enabled', False)),
                 'time_format': getattr(container, '_rule_time_format', 'yyyy-mm-dd'),
                 'parts': [
@@ -14576,6 +15215,18 @@ class FlowEditorDialog(QDialog):
             for idx in range(max_inner):
                 rule_data = self._build_rule_data(node, None, idx)
                 folder = _compute_rule_folder_name(rule_config, rule_data)
+                # 预创建时拿不到正文（此时响应还没解析），会算成“只有日期”的空目录；
+                # 真正存盘时会按 item 重新算并创建正确目录，所以这里跳过这种占位目录，
+                # 避免磁盘上留下 <日期> 空文件夹。
+                try:
+                    import datetime as _dt
+                    _fmt = (rule_config.get('time_format') or 'yyyy-mm-dd')
+                    _py = _fmt.replace('yyyy', '%Y').replace('mm', '%m').replace('dd', '%d')
+                    _today = _dt.datetime.now(_dt.timezone.utc).strftime(_py)
+                    if folder == _today:
+                        continue
+                except Exception:
+                    pass
                 sub = os.path.join(storage_path, folder)
                 try:
                     os.makedirs(sub, exist_ok=True)
@@ -14586,15 +15237,126 @@ class FlowEditorDialog(QDialog):
                 self.api_log_text.append(
                     f"  预创建 {len(created)} 个规则文件夹（数组共 {max_inner} 项）")
 
+    def _json_author_name(self, text):
+        """从条目原始 JSON 里取分组昵称（JSON 落盘时直接用，不再依赖列表接口）。"""
+        try:
+            j = json.loads(text or '')
+            if isinstance(j, str):
+                j = json.loads(j)
+        except Exception:
+            return ''
+        item = ((j.get('data') or {}).get('item') if isinstance(j.get('data'), dict) else None)
+        if isinstance(item, list):
+            item = item[0] if item else None
+        for m in (item or {}).get('modules') or []:
+            a = (m.get('module_author') if isinstance(m, dict) else None) or {}
+            if isinstance(a, dict) and a.get('name'):
+                return str(a['name'])
+        return ''
+
+    def _json_author_mid(self, text):
+        """从条目原始 JSON 里取分组 mid（用于把 JSON 落到分组目录）。"""
+        try:
+            j = json.loads(text or '')
+            # 响应体可能是 json.dumps 过的字符串（落盘时才拆壳），这里先解一层
+            if isinstance(j, str):
+                j = json.loads(j)
+        except Exception:
+            return ''
+        item = ((j.get('data') or {}).get('item') if isinstance(j.get('data'), dict) else None)
+        if isinstance(item, list):
+            item = item[0] if item else None
+        for m in (item or {}).get('modules') or []:
+            if not isinstance(m, dict):
+                continue
+            a = m.get('module_author') or {}
+            if isinstance(a, dict) and a.get('mid'):
+                return str(a['mid'])
+        return ''
+
+    def _uname_for_mid(self, mid):
+        """从列表接口响应里把 mid 映射成昵称（没有就返回空串）。"""
+        try:
+            key = str(mid).strip()
+            for n in getattr(self.scene, 'nodes', []):
+                if not isinstance(n, APINode):
+                    continue
+                if 'relation/followings' not in str(getattr(n, 'url_path', '')):
+                    continue
+                rj = getattr(n, 'result_json', None)
+                if not isinstance(rj, dict):
+                    continue
+                lst = (rj.get('data') or {}).get('list') or []
+                for it in lst:
+                    if isinstance(it, dict) and str(it.get('mid')) == key:
+                        return str(it.get('uname') or '')
+        except Exception:
+            pass
+        # 列表接口只含当前页，翻页外的分组查不到 → 用本地缓存兜底（跑过一次就会记住）
+        try:
+            key = str(mid).strip()
+            cache = self._uname_cache()
+            if key in cache:
+                return cache[key]
+        except Exception:
+            pass
+        return ''
+
+    def _uname_cache(self):
+        import json as _json
+        import os as _os
+        path = _os.path.join('data', 'bili_uname.local.json')
+        if not hasattr(self, '_uname_cache_data'):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    self._uname_cache_data = _json.load(f) or {}
+            except Exception:
+                self._uname_cache_data = {}
+        return self._uname_cache_data
+
+    def _remember_uname(self, mid, uname):
+        try:
+            if not mid or not uname:
+                return
+            cache = self._uname_cache()
+            if cache.get(str(mid)) == str(uname):
+                return
+            cache[str(mid)] = str(uname)
+            import json as _json, os as _os
+            _os.makedirs('data', exist_ok=True)
+            with open(_os.path.join('data', 'bili_uname.local.json'), 'w', encoding='utf-8') as f:
+                _json.dump(cache, f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    def _author_from_url(self, url):
+        """媒体链接 -> 分组 mid。
+        new_dyn 的文件名固定是「32 位 md5 + 分组 mid」，md5 是十六进制，
+        所以直接用「去掉扩展名后从第 33 位开始」取，不能靠尾随数字正则。
+        """
+        try:
+            name = str(url or '').split('?')[0].rstrip('/').split('/')[-1]
+            stem = name.rsplit('.', 1)[0] if '.' in name else name
+            if len(stem) > 32 and stem[32:].isdigit():
+                return stem[32:]
+            if stem.isdigit():
+                return stem
+            m = re.search(r'(\d{5,})$', stem)
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+        return ''
+
     def _current_source_key(self, node, full_url, item_index=None):
         """推导当前下载项的来源路径主键（内容寻址）。
 
         优先取【本节点实际下载的数组值】——即 node._array_values 中当前索引项：
-          - 封面节点（绑定 $.[0].file.path）→ 各帖封面路径
+          - 媒体节点（绑定 $.[0].file.path）→ 各帖媒体路径
           - 附件节点（绑定 $.[0].attachments.[0].path）→ 各附件路径
         使两个节点即使共用同一套上游数组、同一参数名、同一 URL 模板，
-        主键也各自不同，不再因都用 _array_source_list 的 file.path（封面）
-        而互撞：否则封面节点存盘后，附件节点的每一项都会被清单误判为
+        主键也各自不同，不再因都用 _array_source_list 的 file.path（媒体）
+        而互撞：否则媒体节点存盘后，附件节点的每一项都会被清单误判为
         “已下载”而整体跳过（94 个 URL 全部不被检索）。
 
         回退：_array_source_list 的 file.path → URL 路径。
@@ -14616,7 +15378,7 @@ class FlowEditorDialog(QDialog):
                             return f"{tag}|{base}" if tag else base
                 # 1b) 拼合栏数组绑定（手动主输入 + concat 拖动驱动内轮询的节点，
                 #     如 img 缩略图链：URL 模板相同但每项拼合 hash 不同，
-                #     用实际下载的 concat 数组值做主键，防止与 file 封面键互撞）
+                #     用实际下载的 concat 数组值做主键，防止与 file 媒体键互撞）
                 cav = getattr(node, '_concat_array_values', None)
                 if cav:
                     for cid, arr in cav.items():
@@ -14664,6 +15426,41 @@ class FlowEditorDialog(QDialog):
         tid = self._store_counter
         # ---- 根目录输入点：解析本轮该用的根目录（轮询锁：上游没就绪就不写）----
         _root_name, _root_ok, _root_why = self._container_root_value(container)
+        # 分组归属以本条文件的 URL 为准：数组索引在下载阶段会继续推进，
+        # 存盘时再按索引取名字，会把 A 分组的条目写进 B 分组目录（表现为内容串台/重复下载）。
+        try:
+            _mid_u = self._author_from_url(full_url)
+            if not _mid_u:
+                # 条目 JSON（opus/detail）的 URL 里没有分组 mid，改从**响应体**取。
+                # 注意：这里不能只读 node._last_body_text —— 存盘时它可能还没赋值，
+                # 要优先用本次存盘的 data，再退回文件内容。
+                _body = ''
+                if isinstance(raw_content, str):
+                    _body = raw_content
+                elif isinstance(raw_content, (bytes, bytearray)):
+                    _body = bytes(raw_content[:4000]).decode('utf-8', 'replace')
+                if not _body and tmp_path:
+                    try:
+                        if os.path.isfile(tmp_path):
+                            with open(tmp_path, 'rb') as _f:
+                                _body = _f.read(4000).decode('utf-8', 'replace')
+                    except Exception:
+                        _body = ''
+                if not _body:
+                    _body = getattr(node, '_last_body_text', '') or ''
+                _mid_u = self._json_author_mid(_body)
+                if _mid_u:
+                    _nm = self._json_author_name(_body)
+                else:
+                    _nm = ''
+            else:
+                _nm = ''
+            if _mid_u:
+                # 条目 JSON 自身就带分组昵称 → 直接用，保证 JSON 与图片同一个分组目录
+                _root_name = _nm or self._uname_for_mid(_mid_u) or _mid_u
+                _root_ok = True
+        except Exception:
+            pass
         if not _root_ok:
             self.api_log_text.append(
                 "⏸ 跳过存盘（容器["
@@ -14686,6 +15483,7 @@ class FlowEditorDialog(QDialog):
             rule_config = {
                 'enabled': True,
                 'creation_path': getattr(container, '_rule_creation_path', '') or '',
+                'fallback_path': getattr(container, '_rule_fallback_path', '') or '',
                 'time_enabled': bool(getattr(container, '_rule_time_enabled', False)),
                 'time_format': getattr(container, '_rule_time_format', 'yyyy-mm-dd'),
                 'parts': [
@@ -14821,6 +15619,24 @@ class FlowEditorDialog(QDialog):
         若提供 on_item_done，result 不再累积大对象（内存及时释放）。
         左下角进度条显示全部任务的汇总总进度。
         """
+
+        # ---- 空值最终闸门 ----
+        # 数组里 cover 为 null 时，URL 会被拼成字符串 "None"；
+        # 前面已经在算 URL 的地方拦过一次，这里再兜一层：
+        # 任何 url 为空 / None / null 的任务直接剔除，绝不发出去。
+        try:
+            _before = len(tasks)
+            tasks = [t for t in tasks
+                     if str((t or {}).get('url', '')).strip() not in ('', 'None', 'null')]
+            _drop = _before - len(tasks)
+            if _drop:
+                try:
+                    self.api_log_text.append(
+                        '  ⏭ 跳过 %d 项空链接（cover 为空）' % _drop)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         n = len(tasks)
         if n == 0:
             return []
@@ -15367,6 +16183,50 @@ class FlowEditorDialog(QDialog):
                     if hasattr(node, 'result_label') and node.result_label:
                         node.result_label.setText(f"处理后: {node.processed_data}")
 
+    def _ensure_local_services(self):
+        """图纸里用到本地服务（如 WBI 签名 127.0.0.1:15200）时，启动前自动拉起。
+
+        背景：签名服务没跑时，wts/w_rid 是空串，B 站会按“未签名”处理（412 / -352），
+        表现为「跑完了但一张都没落盘」。与其让人每次手动开，不如执行前检查一次。
+        """
+        try:
+            import socket
+            import subprocess
+            needs = set()
+            for n in getattr(self.scene, 'nodes', []):
+                ref = getattr(n, 'api_ref', None) or {}
+                base = str(ref.get('base_url') or '')
+                if '127.0.0.1:15200' in base or 'localhost:15200' in base:
+                    needs.add(15200)
+            for port in sorted(needs):
+                with socket.socket() as sk:
+                    sk.settimeout(0.3)
+                    if sk.connect_ex(('127.0.0.1', port)) == 0:
+                        continue
+                helper = os.path.join(_project_root(), 'tools', 'bili_wbi_helper.py')
+                if not os.path.exists(helper):
+                    self.api_log_text.append(
+                        f'  ⚠ 端口 {port} 没在监听，且没找到 tools/bili_wbi_helper.py')
+                    continue
+                subprocess.Popen(
+                    [sys.executable, helper, '--port', str(port)],
+                    cwd=_project_root(),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                for _ in range(30):
+                    time.sleep(0.1)
+                    with socket.socket() as sk:
+                        sk.settimeout(0.3)
+                        if sk.connect_ex(('127.0.0.1', port)) == 0:
+                            self.api_log_text.append(
+                                f'  🔧 已自动启动本地签名服务（端口 {port}）')
+                            break
+        except Exception as exc:
+            try:
+                self.api_log_text.append(f'  ⚠ 本地服务检查失败：{str(exc)[:60]}')
+            except Exception:
+                pass
+
     def run_flow(self):
         """按照拓扑顺序执行流程，支持多轮轮询、元素间等待间隔、CSV逐行输出。
 
@@ -15452,6 +16312,9 @@ class FlowEditorDialog(QDialog):
                     all_ordered.append(n)
                     seen.add(n)
 
+        self._start_port_nodes()
+        self._ensure_local_services()
+
         self.api_log_text.append(
             f"▶ 开始执行 — 全局大轮询 "
             + (f"自增（1 → {AUTO_POLL_MAX}）" if global_auto else f"{poll_count} 次")
@@ -15493,7 +16356,9 @@ class FlowEditorDialog(QDialog):
         except Exception:
             n = 0
         try:
-            self.btn_breakpoints.setText(('● 断点 %d' if n else '○ 断点 0') % n)
+            # 注意：n=0 时不能再去 % n —— '○ 断点 0' 里没有占位符，
+            # 会抛 TypeError 被下面的 except 吞掉，表现为“关掉断点后按钮还显示 ● 1”。
+            self.btn_breakpoints.setText(('● 断点 %d' % n) if n else '○ 断点 0')
             self.btn_breakpoints.setStyleSheet(
                 ("QToolButton { background:#3a1e1e; color:#ffb3b3;"
                  "border:1px solid #e05252; border-radius:3px; padding:4px 8px;"
@@ -15503,6 +16368,27 @@ class FlowEditorDialog(QDialog):
                  "font-size:11px; } QToolButton:hover { background:#3a1e1e; }"))
         except Exception:
             pass
+
+    def _on_breakpoints_clicked(self):
+        """左上角「断点 N」按钮：打开断点管理面板（没有断点时退回详情面板）。"""
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            _b = get_bridge()
+            # 先清掉上一张图纸/已删除节点留下的断点，否则计数与列表会对不上
+            _b.retain([n for n in getattr(self.scene, 'nodes', [])])
+            _n = _b.armed_count()
+        except Exception:
+            _n = 0
+        # 断点为 0 也打开管理面板（空态给提示），不再跳去“别的节点详情”——
+        # 那颗按钮的定位是“断点管理入口”，不是“随便打开一个元素框”。
+        try:
+            from portpanel.ui.debug.breakpoint_manager import BreakpointManagerPanel
+            if getattr(self, '_bp_manager', None) is None:
+                self._bp_manager = BreakpointManagerPanel(self)
+            btn = self.btn_breakpoints
+            self._bp_manager.show_near(btn.mapToGlobal(btn.rect().bottomRight()))
+        except Exception as _e:
+            self.api_log_text.append('  ⚠ 断点管理面板打开失败：%s' % str(_e)[:60])
 
     def _open_debug_panel(self):
         """工具栏红点：打开第一条已开启断点（没有就用当前选中的 API 元素框）。"""
@@ -15662,11 +16548,11 @@ class FlowEditorDialog(QDialog):
                 self.api_log_text.append(
                     f"  🔎 自增终止依据: {_csv_names}（各 {_csv_rows} 行）")
 
-            # ---- 类内分页：步进器 = 内层（页），数据库框数据行 = 外层（作者）----
+            # ---- 类内分页：步进器 = 内层（页），数据库框数据行 = 外层（分组）----
             # 启用条件：本组「勾了自增 + 不是全局组 + 有步进器 + 有数据源」。
             # 为什么必须这样分：步进器与数据库框原本在**同一轮**里各推进一次，
-            # 于是第 N 轮 = 「第 N 个作者 + 第 N 页」，数据行与页码同步前进 ——
-            # 表现为「每个作者都只下一页，而且页码还跟轮次走」。
+            # 于是第 N 轮 = 「第 N 个分组 + 第 N 页」，数据行与页码同步前进 ——
+            # 表现为「每个分组都只下一页，而且页码还跟轮次走」。
             # 分两层后：外层每换一个数据行，内层从第 1 页重新翻到翻不动为止。
             g_page_apis = [n for n in g_nodes if isinstance(n, APINode)
                            and any(c.start_obj in g_steppers and c.end_obj is n
@@ -15744,7 +16630,7 @@ class FlowEditorDialog(QDialog):
                 elif g_csv and round_idx > 1 and not _paged:
                     # 类组同样要逐轮进位消费数据（此前完全没接，是「跑不完全程」的根因之一）
                     # ⚠ 双层循环（_paged）下**绝不能**逐轮进位：数据行由内层翻完后进位，
-                    #   否则数据行与页码在同一轮里各走一步，变成「每个作者只下一页」。
+                    #   否则数据行与页码在同一轮里各走一步，变成「每个分组只下一页」。
                     self._csv_wrap = self._advance_csv_rows(g_csv)
 
                 # 自增轮询：游标已绕回起点 ⇒ 数据走完一整圈，本轮不再执行
@@ -15932,6 +16818,10 @@ class FlowEditorDialog(QDialog):
                                 # 计算 URL（会更新 node._array_index）并预创建输出块
                                 round_tag = f"{round_idx}.{inner_idx + 1}"
                                 full_url, method, _v = self._compute_api_url(node, round_tag, inner_idx)
+                                if full_url is None:
+                                    self.api_log_text.append(
+                                        f'  ⏭ 跳过第{inner_idx + 1}项（参数为空，无内容可请求）')
+                                    continue
                                 # ---- 下载去重（补判）：数组推不出主键时用刚算出的 URL
                                 # 路径兜底，与写清单时同一函数、同一入参 —— 否则这些项
                                 # 每一轮都会被重新下载（整段跳过检查）
@@ -18295,3 +19185,21 @@ class HandoffModeDialog(QDialog):
         # QDialog 的 Esc 走 reject()，不触发 closeEvent，所以这里也要暂存一次
         self._stash_on_close()
         super().reject()
+
+
+# ================= 端口重绘余量（修“拖动时留下端口拖痕”） =================
+# QGraphicsRectItem 默认 boundingRect 只等于 rect()，而端口圆点/选中描边都画在
+# rect 外面：拖动时 Qt 只重绘 旧+新 boundingRect，框外的端口像素就留成了拖痕。
+# 统一把 boundingRect 外扩一圈（端口半径 6~7 + 选中描边 3 + 余量）。
+_NODE_BOUNDING_MARGIN = 16
+
+
+def _node_bounding_rect(self):
+    r = self.rect()
+    m = _NODE_BOUNDING_MARGIN
+    return r.adjusted(-m, -m, m, m)
+
+
+for _cls in (DataProcessNode, StepperNode, ImageNode, ClassNode, SiteParserNode,
+             CsvDataNode, ContainerNode, APINode):
+    _cls.boundingRect = _node_bounding_rect
