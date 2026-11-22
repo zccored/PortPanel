@@ -8,12 +8,17 @@
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainterPath, QPen
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout,
                                QGraphicsRectItem, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
+
+class _Relay(QObject):
+    """心跳线程 → 主线程的投递口（PortNode 不是 QObject，单独拿一个）。"""
+    message = Signal(object)
+
 
 PROTO_META = {
     'modbus':    {'label': 'Modbus TCP', 'color': '#2f8f5f', 'badge': 'MB'},
@@ -56,6 +61,15 @@ class PortNode(QGraphicsRectItem):
                          'host': o.get('host') or '127.0.0.1',
                          'port': int(o.get('port') or 0)} for i, o in enumerate(outs)]
 
+        # ---- 持续监听地基：消息池 + 心跳 ----
+        from portpanel.engine.message_pool import HeartbeatSync, MessagePool
+        self.pool = MessagePool()
+        self.heartbeat_interval = float(kw.get('heartbeat_interval') or 2.0)
+        self.heartbeat = None
+        self._relay = None
+        self._bp_armed = False
+        self._hb_logs = []
+
         self._bridge = None
         self._timer = None
         self._hover_btn = None
@@ -86,7 +100,8 @@ class PortNode(QGraphicsRectItem):
 
     # ---------------- 几何：端口均匀分布，绘制区包含端口 ----------------
     def boundingRect(self):
-        return self.rect().adjusted(-10, -10, 10, 10)
+        # 端口圆点 + 选中描边都在 rect 外，外扩 16 防拖动拖痕
+        return self.rect().adjusted(-16, -16, 16, 16)
 
     def shape(self):
         path = QPainterPath()
@@ -314,6 +329,12 @@ class PortNode(QGraphicsRectItem):
                 QMessageBox.warning(views[0], '端口启动失败', str(exc))
             return False
         self.listen_port = self._bridge.listen_port
+        # 每一帧都灌进消息池（心跳/断点都读它，而不是读“最后一帧快照”）
+        try:
+            self._bridge.stats.sink = self._on_frame
+        except Exception:
+            pass
+        self._start_heartbeat()
         if self._timer is None:
             self._timer = QTimer()
             self._timer.setInterval(500)
@@ -323,6 +344,12 @@ class PortNode(QGraphicsRectItem):
         return True
 
     def stop(self):
+        if self.heartbeat is not None:
+            try:
+                self.heartbeat.stop()
+            except Exception:
+                pass
+            self.heartbeat = None
         if self._timer is not None:
             self._timer.stop()
         if self._bridge is not None:
@@ -335,6 +362,80 @@ class PortNode(QGraphicsRectItem):
 
     def is_running(self):
         return self._bridge is not None
+
+    # ---------------- 持续监听：消息池 / 心跳 / 断点 ----------------
+    def _on_frame(self, direction, summary, raw, _seen=None):
+        if direction != 'in':
+            return
+        payload = raw if isinstance(raw, dict) else None
+        if payload is None:
+            try:
+                payload = dict(self._bridge.stats.last_payload or {})
+            except Exception:
+                payload = {}
+        if not payload:
+            payload = {'summary': summary}
+        self.pool.put('%s:in' % self.proto, payload)
+
+    def _ensure_relay(self):
+        if self._relay is None:
+            self._relay = _Relay()
+            self._relay.message.connect(self._deliver)
+        return self._relay
+
+    def _start_heartbeat(self):
+        from portpanel.engine.message_pool import HeartbeatSync
+        relay = self._ensure_relay()
+        self.heartbeat = HeartbeatSync(self.pool, sender=relay.message.emit,
+                                       interval=self.heartbeat_interval,
+                                       on_log=self._hb_log)
+        self.heartbeat.start()
+        if self._bp_armed:
+            self.heartbeat.pause()
+
+    def _hb_log(self, text):
+        self._hb_logs.append(text)
+        self._hb_logs = self._hb_logs[-20:]
+        views = self.scene().views() if self.scene() else []
+        if views and hasattr(views[0].window(), 'api_log_text'):
+            try:
+                views[0].window().api_log_text.append('  💓 [%s] %s' % (self.name, text))
+            except Exception:
+                pass
+
+    def _deliver(self, msg):
+        """心跳线程 → 主线程：交给画板把消息推进下游 POST。"""
+        views = self.scene().views() if self.scene() else []
+        if not views:
+            return False
+        editor = views[0].window()
+        fn = getattr(editor, '_heartbeat_push', None)
+        if not callable(fn):
+            return False
+        return fn(self, msg)
+
+    def set_breakpoint(self, armed: bool):
+        """断点点亮 = 只收不发；取消 = 先补发最后一条，再恢复心跳同步。"""
+        armed = bool(armed)
+        if armed == self._bp_armed:
+            return
+        self._bp_armed = armed
+        if self.heartbeat is None:
+            return
+        if armed:
+            self.heartbeat.pause()
+        else:
+            self.heartbeat.release_once('断点取消：补发最后一条')
+            self.heartbeat.resume()
+
+    def release_once(self):
+        """手动放行最后一条：发完仍保持断点，不恢复心跳。"""
+        if self.heartbeat is None:
+            return False
+        return self.heartbeat.release_once()
+
+    def pool_stats(self):
+        return self.pool.stats()
 
     # ---------------- 序列化 ----------------
     def to_dict(self):

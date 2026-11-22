@@ -34,11 +34,17 @@ class PortStats:
     last_error: str = ''
     last_payload: dict = field(default_factory=dict)
     recent: object = field(default_factory=lambda: collections.deque(maxlen=200))
+    sink: object = None          # 每帧回调（消息池用）：sink(direction, summary, raw)
 
     def log(self, direction, summary, raw=None):
         import time as _t
         self.recent.append({'ts': _t.time(), 'dir': direction,
                             'summary': str(summary)[:300], 'raw': raw})
+        if callable(self.sink):
+            try:
+                self.sink(direction, str(summary), raw)
+            except Exception:
+                pass
 
     def as_dict(self):
         return {'frames_in': self.frames_in, 'frames_out': self.frames_out,
