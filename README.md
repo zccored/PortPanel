@@ -1,422 +1,244 @@
 # 端口画板 · PortPanel
 
-> **可视化节点画板 + API 图源配置器** —— 从「全栈图库管理器」里抽出来的独立工具。
-> 拖拽连线搭一条下载流水线，挂上并发/间隔/超时参数，按图纸跑，按图纸存。
->
-> A standalone **visual node board & API source configurator**, extracted from the
-> *全栈图库管理器* (Full-Stack Gallery Manager) suite. Wire nodes into a download
-> pipeline, tune per-drawing rate limits, run it, save it — all without the host app.
+> 一个用「连线画图」的方式来编排 HTTP 请求、处理数据、落盘保存的桌面工具。
+> 不用写代码，把方框连起来，就是一条可以反复运行的数据流水线。
 
-[中文](#中文) ｜ [English](#english)
+![许可证](https://img.shields.io/badge/license-AGPL--3.0-blue)
+![平台](https://img.shields.io/badge/platform-Windows-lightgrey)
+![Python](https://img.shields.io/badge/python-3.12-green)
 
 ---
 
-# 中文
+## 一、这是个什么东西？（给第一次接触的人）
 
-> **当前分支 `zccored-local-2026-10-23` 为实验性 Alpha**：新增工业互联网端口工具（Modbus / PROFINET / WebSocket）、
-> 传输层与断点调试器。图纸（`.wbt`）与图源配置（`api_config.json`）**一律不入库**。
+想象你在浏览器里做一件重复劳动：
 
-## 这是什么
+1. 打开某个网站的接口地址；
+2. 把返回的一段数据里想要的字段挑出来；
+3. 再拿这个字段去请求下一个接口；
+4. 把结果存成文件、写进表格；
+5. 下一页重复以上步骤……
 
-**端口画板**前身叫「平台整合器」（2026-10-06 正式更名），原本是全栈图库管理器里的一个窗口。
-现在它被拆出来，可以：
+**端口画板就是把这一串动作“画”出来**：每个动作是一个**元素框**，元素框之间用**线**连起来表示数据往哪走。
+点一下「执行」，它按你画的关系自动跑完；下次换数据只要改参数，不用重新写程序。
 
-- **单独运行**（源码 `python port_panel.py`，或直接用打包版 `端口画板.exe`）；
-- **仍然能被主程序打开**（同源的两个副本，各自演进 —— 宿主读的是它自己那一份，两边会各自漂移）；
-- **被「图库检索管理器 image-search」一键切换拉起**。
+和其他方式比：
 
-它的核心是一张**画板**：左边从「API 入口」里拖一个接口到画布上，右边挂容器框、数据处理框、
-数据库框，中间用线连起来 —— 一张图纸就是一条完整的下载流水线。
+| | 端口画板 | 写脚本 | 浏览器插件 |
+|---|---|---|---|
+| 要会编程 | 不用 | 要 | 不用 |
+| 复用已有流程 | 存成图纸，下次直接跑 | 改代码 | 一般不能 |
+| 复杂分支与条件 | 逻辑门 + 连线 | 要写判断 | 通常不支持 |
+| 调试请求 | 断点、报文对照 | 打日志 | 开发者工具 |
 
-## 快速开始
+---
 
-### 方式一：用打包版（普通用户推荐）
+## 二、能做什么
 
-1. 到 [Releases](https://github.com/zccored/PortPanel/releases) 下载
-   `PortPanel-vX.Y.Z-win64.zip`；
-2. 解压到任意目录（**别放在 `C:\Program Files` 之类需要管理员权限的地方** ——
-   程序要往自己的 `data/` 里写配置与日志）；
-3. 双击 `端口画板.exe`。
+- **任意 HTTP 接口**：GET / POST / PUT / DELETE；参数可放路径、查询串、请求头、Body（JSON / 表单 / 原文 / 文件）。
+- **参数自动替换**：`{name}` 从上游取值，`${ENV:XXX}` 读环境变量（适合放密钥，不写进图纸）。
+- **数组逐项处理**：一个接口返回 20 条，下游可以按 20 次逐条跑，每项各自带上下文。
+- **数据处理**：正则提取、JSON 路径提取（`$.data.items[*].field`）、按主键分组记游标。
+- **存储**：内容寻址落盘（`<sha256>.ext`）、按规则自动建目录（时间 / 字段值 / 拼合段）、CSV 数据库框读写去重。
+- **条件与闸门**：与门 / 非门 / 异或门，输入只认 `true` / `false`，条件成立才放行下游。
+- **调试**：断点（请求发出前暂停、可改包再放行）、实时报文面板、节点观察器。
+- **面板贴边隐藏**：断点面板与详情面板可吸附屏幕边缘，鼠标碰边自动展开。
+- **命令行**：`python -m portpanel.cli` 可以列节点、跑图纸、签名，脱离界面执行。
 
-绿色免安装：整个目录拷走就能用，卸载 = 删目录。
+---
 
-### 方式二：源码运行
+## 三、5 分钟上手
+
+### 3.1 安装
+
+**方式 A：直接用打包好的程序（推荐给不想装环境的人）**
+
+到 Releases 页下载 `PortPanel-*-win64.zip` → 解压 → 双击 `端口画板.exe`。
+无需安装 Python，解压即用；数据都在解压目录的 `data/` 里。
+
+**方式 B：从源码运行（推荐给要改代码的人）**
 
 ```bash
-git clone https://github.com/zccored/PortPanel.git
+git clone https://github.com/<你的账号>/PortPanel.git
 cd PortPanel
 python -m pip install -r requirements.txt
 python port_panel.py
 ```
 
-要求 **Python 3.12+**（开发环境 3.12.x）。
+要求：Windows 10/11 + Python 3.12（PySide6 6.9.x）。
 
-### 方式三：从主程序打开
+### 3.2 画第一条流水线
 
-如果同目录下装了「全栈图库管理器」，在它的工具栏点 **📷 图源配置** 或
-**连接 → 端口画板** 即可 —— 打开的是一模一样的窗口。
+目标：请求一个接口 → 取出某个字段 → 打印出来。
 
-## 界面速览
+1. **新建图纸**：菜单 `文件 → 新建`。
+2. **放一个接口框**：工具栏点「API」→ 画布中央出现蓝色框。
+   - 双击框体打开「图源配置」，填 `基础地址`（例：`https://example.com`）与 `路径`（例：`/api/items`）；
+   - 参数表加一行：名字 `page`，值 `1`，位置 `query`。
+3. **放一个数据处理框**：工具栏点「数据处理」→ 双击它，源路径填 `$.data.items[*].id`。
+4. **连线**：按住接口框右侧的红点，拖到数据处理框左侧的绿点，松开。
+5. **执行**：点左上角「▶ 执行」，日志会打印请求过程与提取结果。
+6. **保存**：`文件 → 保存`，得到 `.wbt` 图纸文件（这是你的流程，默认不入库，见第六节）。
+
+> 想存成文件？再放一个「容器框」：存储路径填 `~/Downloads/demo`，把数据处理框的输出连到容器框。
+> 文件会按内容哈希命名落到该目录，重复内容自动跳过。
+
+### 3.3 让它跑多页
+
+- 工具栏「步进器」：设步长 1、起始 1，连到接口的 `page` 参数 → 每轮自动 +1；
+- 或在参数值里用模板引用步进器的输出。
+
+---
+
+## 四、界面速览
 
 ```
-┌─ 工具栏 ────────────────────────────────────────────────────────────────────┐
-│ ▶执行  ▸轮询参数  📷图源配置  🗄️数据库框  📦容器框  💾保存流程  📂加载流程  🛠️工具栏 │
-├─ 图纸选项卡 ────────────────────────────────────────────────────────────────┤
-│ [图纸A*] [图纸B] [图纸C]                                                    │
-├──────────────┬─────────────────────────────────────────────┬────────────────┤
-│ 🗂 侧栏    ◀ │            📊 数据传递参数 ▼                │ ▶ 数据处理/输出 │
-│ 📡 API 入口   │  并发 4 · 等待 0.5s · 重试 3×1s    [恢复默认] │  API 收发日志   │
-│ 📁 已保存流程图│ ┌─────────────────────────────────────────┐ │  …             │
-│              │ │         可视 化 画 板（节点图）          │ │  输出           │
-│              │ └─────────────────────────────────────────┘ │                │
-└──────────────┴─────────────────────────────────────────────┴────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ ▶ 执行   ○ 断点 0   ▶ 轮询参数      缩放 100%   保存/打开      │  ← 工具栏
+├───────────────┬──────────────────────────────────────────────┤
+│               │                                              │
+│   API 元素框   │        ●───连线───▶ ●                        │  ← 画布
+│  （蓝底黑边）   │        输入点          输出点                  │
+│               │                                              │
+├───────────────┴──────────────────────────────────────────────┤
+│ 日志 / 报文 / 报错                                            │  ← 下方面板
+└──────────────────────────────────────────────────────────────┘
 ```
 
-- **黑夜模式固定**：无论你的 Windows 是深色还是浅色主题，界面永远是深色 —— 与作者本机一致。
-- **两侧栏可整栏横收**：点侧边竖条上的 `◀` / `▶`，面板缩成 18px 细边，画板拿到全部宽度。
-
-## 功能一览
-
-### 一、画板与节点
-
-| 节点 | 作用 |
+| 元素 | 说明 |
 |---|---|
-| **API 节点** | 请求引擎。参数替换（`{name}` 占位符）+ 数组迭代逐项请求；自动识别 JSON / 二进制响应；请求头可自定义 |
-| **数据库框** | CSV / Excel 逐行输出与消费；上游数据可自动写入（upsert / 追加，可指定主键列）；游标按轮次推进 |
-| **数据处理框** | 正则替换、按路径从上游 JSON 取字段、拼接 |
-| **容器框** | 下载落盘。存储路径、**动态根目录输入点**（由上游决定写进哪个文件夹）、命名规则拼合（常量/时间/上游字段）、字节与文件数统计 |
-| **步进器** | 数值发生器：起始值 + 步长 + 公式，喂给下游做分页参数 |
-| **站点解析** | 抓 HTML 页面，按规则抽出文件列表 |
-| **图片节点** | 参考元素（不参与执行，用于备查） |
-| **类框** | 把若干元素圈成一组：独立轮询次数、独立自增开关、类间触发连线 |
+| 蓝底方框 | 一个元素节点（接口 / 数据处理 / 数据库 / 容器 / 步进器 / 逻辑门 …） |
+| 绿点 | 输入端口（数据从上游进来） |
+| 红点 | 输出端口（数据往下游走） |
+| 黄色虚线 | 连线，表示数据流向 |
+| 类框（大块淡色矩形） | 把一组框圈起来，可整体移动、按类设置轮询次数 |
+| 右下角小红点 | 断点开关（空心=未开，实心=已开） |
+| 鼠标悬停 | 弹出 SVG 说明卡（端口、当前值、用途） |
 
-其它画板能力：
+快捷键：`Ctrl+S` 保存、`Delete` 删除选中、滚轮缩放、中键平移、`Ctrl+滚轮` 精细缩放、`Esc` 取消连线。
 
-- 多图纸**选项卡**，每张图纸独立场景 / 日志 / 输出 / 参数；
-- 撤销栈（20 步）、整块框选拖动、连线拖拽到视口边缘自动滚动；
-- **悬停 SVG 提示框**：鼠标悬停任一元素框约 **0.25 秒**，弹出一张按该框真实端口**实时生成**的示意图 ——
-  端口键名、当前值，以及你在「图源配置」里为每个参数写的**注释**、为每个子端口写的**说明**；
-  浮窗**点击穿透**（不挡下面的框、也不吃点击），展开后仍跟随鼠标，鼠标离开元素框**立即收起**；
-  需要专心连线 / 拖框时，可用工具栏「**悬停详情**」开关整体关掉（状态会被记住）。
+---
 
-### 二、执行引擎
+## 五、核心概念
 
-- **拓扑排序**决定执行顺序（不是按摆放位置）；
-- **上下轮询锁**：上游本轮没就绪，下游不会拿上一轮的老数据往下写；
-- **大轮询**两种模式：固定轮数拨盘 / **自增**（1 → 99，遇下载层错误或数据走完即停）；
-- **类嵌套循环**：外层跑完 1 轮就把控制权交给子类，子类按自己的规则把**整段**跑完才回外层 ——
-  信息层层向下传递，不会"主类跑完了子类没收到"；
-- **类内分页双层循环**：步进器当**内层页码**、数据库框当**外层数据行**；
-  每个作者从第 1 页翻到翻不动为止，才换下一个作者（而不是"每个作者只下一页"）；
-- 元素间等待、随时取消、执行中**禁止重复启动**（再点会提示去左下角取消）。
+### 图纸（`.wbt`）
+一份 JSON，记录所有元素框的位置、参数、连线、类框分组、以及「数据传递参数」仪表盘设置。
+**图纸会包含接口地址和请求头**，因此默认被排除在版本库之外（见第六节）。
 
-### 三、下载器
+### 元素框类型
 
-- **三种下载模式**自动选择：小文件进内存 / 大文件 Range 分块并行 / 超大文件流式写临时文件；
-- **批内并发**（默认 4 个文件同时下）+ **单文件分块并发**（默认 4 线程）；
-- 失败重试（次数与间隔可调）、连接/读取超时分离、断点续传；
-- **403 专判**：服务端明确拒绝时不当作"文件内容"读进来反复重试；
-- **curl_cffi 浏览器指纹回退**：`requests` 被 TLS 指纹风控拦住时自动换通道；
-- **去重清单** `download_manifest.json`（写读同根）+ **本地 sha256 完整性复核** ——
-  同尺寸但内容已损坏的文件不会被误判成"已下载"。
-
-### 四、数据传递参数仪表盘（本工具的特色）
-
-画板顶部那一条「📊 数据传递参数」，把散落各处的**14 项速率/频次参数**收进一处：
-
-| 分组 | 参数 |
+| 类型 | 作用 |
 |---|---|
-| 并发与频次 | 并行下载文件数、单文件重试次数、重试间隔、元素间等待、大轮询次数、全局自增轮询 |
-| 超时 | 连接超时、读取超时、API 请求超时 |
-| 分块与阈值 | 单文件分块并发、分块大小、图片小文件阈值、其他小文件阈值、流式写盘阈值 |
+| API | 发一个 HTTP 请求，返回 JSON / 文本 / 二进制 |
+| 数据处理 | 从上游响应里按 JSON 路径或正则提取字段 |
+| 数据库 | 读写本地 CSV，支持按主键去重、分页读取 |
+| 容器 | 存储落点：按规则建目录、内容寻址命名、写下载清单 |
+| 步进器 | 产出递增 / 递减数值，驱动分页 |
+| 站点解析 | 解析网页里的资源链接（正则 / 选择器） |
+| 图片 | 画布上的参考图，不参与执行 |
+| 逻辑门 | 与门 / 非门 / 异或门，控制支路是否放行 |
+| 端口 | 工业协议调试（Modbus / PROFINET / WebSocket） |
 
-设计要点：
+### 端口与数据流
+- 一个框可以有多个输入口与输出口；连线时带上**参数名**，下游按名字取值。
+- 上游返回数组时，下游按「内轮询」逐项执行，每项各自带上下文，不会互相覆盖。
 
-- **随图纸保存**（存进 `.wbt` 的 `transfer` 键）—— 参数因图纸而异，换图纸就换一套；
-- **执行时快照一次**：运行中再改参数不影响本轮，下一轮/下次执行才生效；
-- **每个下载线程显式持有那份快照**（不可变对象）—— 为将来"多张图纸并发下载"预留了线程隔离；
-- **默认值 = 引入该功能之前的原值**，没动过参数 = 行为与以前逐字节一致；
-- 老图纸首次打开会用默认值在内存里**缓冲更新**一份，保存时会多问一次「是否更新下载参数？」。
+### 轮询与锁
+- 顶部「轮询次数」控制整张图纸跑几轮；类框可单独设置轮询次数。
+- 执行器有「数据就绪」判定：上游本轮没跑到、数据库框本轮没有新数据时，下游会被**跳过**，而不是拿旧数据硬跑。
 
-### 五、图源配置
+### 断点
+- 点元素框右下角红点开启断点，请求发出前会暂停。
+- 左上角「断点 N」按钮打开**节点观察器**：列出画布上所有元素框，未开启的是灰色空心点，点一下即可切换。
 
-独立窗口，也可以从主程序的「API 和云服务配置」里进去（同源的两个副本，各自演进）：
+---
 
-- **API 入口**（一个站点）→ **子端口**（一条路径）→ **参数**（名 / 类型 / 值 / **注释**）；
-- 请求头：自定义、`${ENV:VAR}` 环境变量占位符、实时时间头、Cookie 导入与验证、批量粘贴；
-- **调试**：真实发包、响应诊断（是不是风控页、缺哪个头、Cookie 有没有生效）；
-- **📥 导入入口 / 📤 分享入口**：一个入口 = 一个 `.apientry.json`，导出即分享，
-  别人拿到直接导入就能用（重名自动加 `(2)`，也兼容整套配置文件）。
+## 六、隐私与安全（重要）
 
-### 六、日志与输出
+1. **图纸不入库**：`.wbt` 含接口地址与请求头，`.gitignore` 已排除。
+2. **凭据走环境变量**：参数里写 `${ENV:MY_TOKEN}`，运行前设好环境变量，图纸里不出现明文。
+3. **本地密钥文件**：`data/*.local.json`、`data/api_config.json` 均被忽略，仅本机使用。
+4. **提交前自检**：仓库自带扫描器
 
-- 数据处理页日志**实时落盘** `logs/run_<时间戳>/session.log`，崩了也能查；
-- 超 1000 行自动**窗口化折叠**，滚动到边缘按需加载，跑几万行也不卡；
-- 纯文本 / 富文本（JSON 树状着色）两种视图，且**内容永远一致**；
-- 输出面板按条记录每次下载：根目录 / 子文件夹、进度条、完成后点击**直达资源管理器**。
+   ```bash
+   python tools/check_no_secrets.py          # 工作区
+   python tools/check_no_secrets.py --all    # 含历史提交
+   ```
 
-### 七、与「图库检索管理器 image-search」的互切
+   会检查 Cookie、私钥、各类 Token、本机绝对路径、站点名等模式。
+5. **日志脱敏**：输出栏与日志里 Cookie 只显示长度与前缀，不打印明文。
 
-两边是一对可以互相拉起的程序：
+---
 
-| 方向 | 触发 | 行为 |
-|---|---|---|
-| 端口画板 → image-search | 工具栏「🔁 下载完成→图库检索」 | 写交接请求 → 分离启动过渡进程 → **自己退出让出内存** → image-search 自动建库并回写结果 |
-| image-search → 端口画板 | 主界面的「⇄ 切换启动」 | 校验目标 → 启动对端 → 关掉自己 |
-
-**目标优先级**（image-search 侧）：
-
-1. 环境里有 `main.py`（全栈图库管理器主程序）→ **优先且只用它**，并做 SHA256 白名单校验（防篡改）；
-2. 没有 `main.py`，但有 `端口画板.exe`（或源码入口）→ 用它，**不做哈希校验**；
-3. 都没有 → 按钮不予激活。
-
-也就是说：把打包版单独发给别人，对方机器上照样能从 image-search 一键切过来。
-
-### 八、工业互联网端口工具（实验性 · Alpha）
-
-> ⚠️ 这一块是**实验性内容**，只存在于分支 `zccored-local-2026-10-23`，不进主分支。
-> 现场接入（TIA / NX MCD / 真实 PLC）前请先读本节末尾的边界说明。
-
-工具栏只有一个入口 **🖥 端口工具**，打开后是一个「端口查看器」，Modbus / PROFINET /
-WebSocket 三种工具都在里面，需要时点 `＋ Modbus / ＋ PROFINET / ＋ WebSocket` 现场新建，
-不再往工具栏堆按钮。
-
-**端口节点（交换机式）**
-
-- 输入路数可配（1–32），有几条就画几个输入点，每个点可单独连线；
-- 输出目标是一张表（名称 / 主机 / 端口），一个入口可同时转发到多个目标；
-- 节点内 `▶ 启动 / ■ 停止` 直接拉起或停掉监听，不依赖「执行」；状态与收发计数实时刷新；
-- 选中即可拖动、Delete 删除，也能与其它元素框一起框选成「类」。
-
-**三种协议**
-
-| 协议 | 入口 | 出口 | 说明 |
-|---|---|---|---|
-| Modbus TCP | 从站（PLC 写进来） | 客户端写目标 | FC1/3/4/5/6/15/16；`auto` 转发写入段，`mirror` 整段镜像 |
-| PROFINET RT | `PNRT` 隧道帧（TCP） | RT 帧转发 | 真机需把入口换成 pcap / raw socket，槽位解析不变 |
-| WebSocket | WS 服务端收 JSON | 组成 RT 帧转发 | 反向 `PN→WS` 把 RT 帧广播成 JSON，兼容无 TIA 的演示环境 |
-
-**端口查看器**：左栏按端口列信息源，右栏是当前端口的帧表 + 可编辑报文；顶部可随时
-切换协议并重启端口。窗口是**非模态**的，可以随便拖到第二块屏幕上。
-
-**无 TIA 的收发信测试**（自建仿真，不依赖现场设备）：
+## 七、命令行
 
 ```bash
-python tools/industrial_demo.py                 # TIA 仿真 → 端口节点 → NX 机电模拟 闭环
-python tools/run_port_flow.py --simulate        # 执行图纸里的端口节点
-python tools/make_industrial_drawing.py         # 生成演示图纸（仅本地，不入库）
+python -m portpanel.cli nodes  drawing.wbt          # 列出图纸里的节点
+python -m portpanel.cli exec   drawing.wbt          # 执行（离屏，不必打开界面）
+python -m portpanel.cli run    --url https://example.com/api --json
+python -m portpanel.cli sign   --query "a=1&b=2"    # 需要签名算法时
 ```
 
-**边界**
+退出码：`0` 成功，`1` 运行失败，`2` 参数错误。
 
-- PROFINET 走的是隧道帧，普通 TCP 收不到二层 0x8892，真机要换入口；
-- Modbus 端口当前是**被动从站**（PLC 主动写），轮询型 PLC 需要再加一个主动读的源；
-- NX MCD 的寄存器映射表（地址/类型）需要按现场给的表填写。
+---
 
-## 目录结构
+## 八、扩展：写一个新的元素框
 
-```
-PortPanel/
-├─ port_panel.py            # 独立启动入口（打包也是它；只建 QApplication + 开画板）
-├─ portpanel/               # 程序本体（2026-10-11 起按职责分层）
-│   ├─ core/                # 无 Qt 依赖：项目根判定（paths）；配置模型 / 参数解析后续迁入
-│   ├─ engine/              # 执行循环 / 下载 / 落盘 / 清单 / 会话日志（方法级外迁进行中）
-│   ├─ ui/                  # flow_editor（画板主体：节点、悬停提示、仪表盘…）、
-│   │                       # image_source（图源配置）、tour_*（引导）
-│   └─ integration/         # theme（深色配色，本仓库自有）、ui_prefs（本机 UI 偏好）、
-│                           # logger / secure_store / aliyun_client
-├─ port_panel.spec          # PyInstaller 打包配置
-├─ requirements.txt
-├─ design/                  # 设计 token / 图标单一来源（生成到 webui 与 Qt 侧常量）
-├─ webui/                   # Web 前端（Vue 3 + TS + Vite；阶段 0 试点）
-├─ tools/                   # 性能探针（本机量测用）
-└─ data/
-    └─ node_svg/            # 悬停提示框的 SVG 模板（9 个，纯 UI 模板）
-```
+1. 在 `portpanel/ui/nodes/` 新建 `xxx_plugin.py`，按 `spec.py` 里的枚举与协议实现 `NodeSpec`；
+2. 在 `portpanel/ui/nodes/__init__.py` 注册；
+3. 多端口节点要实现 `input_names()` / `output_names()` 与**蛇形** `input_port(name)` / `output_port(name)`；
+4. 悬停说明卡三件套：`data/node_svg/xxx.svg` 模板 → `_svg_file_for()` 注册 → `_fill_svg()` / `_hover_port_rows()` 填内容。
 
-> **这个仓库里没有图纸、没有 API 入口内容、没有任何凭据。** 这是刻意的：
-> `.wbt` 图纸会原样存下请求头（含真实 Cookie/session），API 入口内容属于使用者自己的数据，
-> 都不应该随代码分发。仓库与发行包里只有**程序本身和纯 UI 资源**。
-> 首次运行时程序会自己生成一份空的加密配置，图纸也要你自己新建 —— 从零开始搭，或导入别人给你的图纸。
+详细约定见 `docs/architecture/08-node-plugins.md`。
 
-## 自己打包
+---
+
+## 九、构建与发布
+
+**本地构建**
 
 ```bash
-python -m pip install pyinstaller==6.15.0
-python -m PyInstaller --noconfirm --clean port_panel.spec
-# 产物：dist_panel/端口画板/端口画板.exe（onedir，整个目录一起分发）
+python -m pip install pyinstaller
+pyinstaller port_panel.spec --noconfirm
+# 产物：dist/端口画板/端口画板.exe
 ```
 
-`port_panel.spec` 里做了几件事，自己改的话注意别破坏：
+**GitHub Actions 自动构建**
 
-- **onedir 而不是 onefile**：onefile 每次启动都要解压 ~200MB，首启 10 秒起；onedir 秒开，
-  也方便 image-search 按路径找到 exe；
-- **排除用不到的 Qt 模块**（WebEngine / Quick / 3D / Multimedia…），不排的话包会大三四百 MB；
-- **打包清单是白名单**：只列 `data/node_svg` 这一个纯资源目录。
-  文件里还有一道**兜底闸门** —— 一旦 `datas` 里出现 `webtree` / `manifest` / `webAPI` /
-  `api_config.json`，构建会**直接报错退出**，而不是把用户数据悄悄打进发布包。
-  （这道闸门是补出来的：第一版用的是"排除已知敏感目录"的黑名单写法，
-  结果 `data/manifest/`、`data/webAPI/` 这两个运行时数据目录被打了进去 ——
-  里面是使用者本机的下载记录和抓取到的名录。教训：**打包清单要用白名单**，
-  因为 `data/` 下面随时会长出新的用户数据目录。）
+推一个 `v*` 标签即可，工作流会自动：
 
-## 隐私与安全
+1. 装依赖（Windows 环境）；
+2. 用 `port_panel.spec` 打包；
+3. 压缩成 zip；
+4. 创建 / 更新对应 Release 并附上压缩包。
 
-**仓库与发行包里不含任何使用者数据。** 具体来说，下面这些**一律不分发**：
+不需要在本机打包或上传大文件。
 
-| 类别 | 为什么 |
-|---|---|
-| `.wbt` 图纸 | 里面既有 API 入口（`api_ref`），又有**原样存盘的请求头**（真实 Cookie / session） |
-| API 入口内容 | 站点地址、子端口路径、参数、请求头、Cookie —— 属于使用者自己的配置 |
-| `data/api_config.json` | 真实图源配置（已加密），首次运行时由程序自己生成 |
-| `data/manifest/` | 下载清单 —— 含**本机存储路径、内容标题、文件哈希** |
-| `data/webAPI/` 等抓取结果 | 抓下来的名录/表格等，是使用者的数据 |
+---
 
-程序侧的保护：
+## 十、常见问题
 
-- `data/api_config.json` 用 **AES（Fernet）+ 机器绑定密钥**加密落盘，备份文件
-  `*.plain.backup` 也走密文缓存（明文只在内存里）；
-- 程序只在你按下「执行」或「调试」时才会向外发请求，不会后台偷偷联网。
+**Q：点执行没反应，日志说“未检测到可执行的元素”？**
+A：图纸里的接口框要被**类框**包住（或至少有一个可执行框）。选中框 → 右键「整合为类」。
 
-如果你要**分享自己的图纸**给别人：`.wbt` 会把请求头原样带出去，
-请先把里面的 Cookie / Authorization 之类清掉或换成 `${ENV:...}` 占位符再发。
+**Q：请求失败，提示 TLS / 证书错误？**
+A：先确认系统代理是否可用；工具会跟随 Windows 系统代理设置。
+
+**Q：返回 403 / 429，或页面是验证码？**
+A：目标站点在限流。把「轮询参数」里的接口间隔调大、并发调小，多轮之间加冷却时间。
+
+**Q：下游拿到的是空值？**
+A：检查连线是否带了正确的**参数名**；上游是数组时，确认内轮询已开启。
+
+**Q：图纸打不开 / 打开后是空白？**
+A：图纸版本比程序新。用对应版本的 Release，或升级程序。
+
+**Q：数据存在哪？**
+A：容器框里配置的存储路径；运行数据（清单、游标、去重表）在 `data/` 下，均不入库。
+
+---
 
 ## 许可证
 
-**AGPL-3.0-only**，见 [LICENSE](LICENSE)。
-
-你可以自由使用、修改、再分发；但如果你把它（或修改版）作为网络服务提供给他人，
-必须公开你的完整源码。
-
----
-
-# English
-
-## What is this
-
-**PortPanel** (formerly "Platform Integrator") used to be a window inside the
-*Full-Stack Gallery Manager*. It now stands on its own:
-
-- **Runs standalone** — either from source (`python port_panel.py`) or as the packaged
-  `端口画板.exe`;
-- **Still opens from the host app** — both entry points share the exact same code, so
-  they can never drift apart;
-- **Can be launched by the [ImageSearchTool](https://github.com/zccored/ImageSearchTool)
-  with one click.**
-
-At its core is a **canvas**: drag an endpoint from the "API entry" tree onto the board,
-attach a container node, a data-process node and a CSV node, wire them together — one
-drawing *is* one download pipeline.
-
-## Quick start
-
-### Option 1 — packaged build (recommended for end users)
-
-1. Grab `PortPanel-vX.Y.Z-win64.zip` from
-   [Releases](https://github.com/zccored/PortPanel/releases);
-2. Unzip anywhere **except** privileged locations such as `C:\Program Files` — the app
-   writes its own config and logs into its `data/` folder;
-3. Double-click `端口画板.exe`.
-
-Portable: copy the folder anywhere, uninstall by deleting it.
-
-### Option 2 — from source
-
-```bash
-git clone https://github.com/zccored/PortPanel.git
-cd PortPanel
-python -m pip install -r requirements.txt
-python port_panel.py
-```
-
-Requires **Python 3.12+** (developed on 3.12.x).
-
-### Option 3 — from the host application
-
-If the Full-Stack Gallery Manager sits next to it, click **📷 Image Sources** on its
-toolbar (or *Connect → PortPanel*). You get exactly the same window.
-
-## Features at a glance
-
-**Canvas & nodes** — API node (parameter substitution + array iteration, JSON/binary
-auto-detection), CSV/Excel node (row-by-row in/out, upstream auto-ingest with an
-optional key column), data-process node (regex, JSON path extraction), container node
-(storage path, **dynamic root folder driven by an upstream value**, naming-rule
-composition), stepper, site parser, image node, and *class* boxes that group elements
-with their own polling count and auto-increment switch.
-
-**Execution engine** — topological ordering, upstream/downstream poll gating (a
-downstream node never writes stale data), fixed-count or auto-increment (1→99) polling,
-**nested class loops** (outer runs one round, hands over to the inner class which
-finishes its *entire* loop before control returns), **two-level pagination inside a
-class** (stepper = inner page, CSV row = outer record), per-element wait, cancel
-anytime, and a re-entrancy guard that refuses a second start while a run is in flight.
-
-**Downloader** — three automatic modes (in-memory / parallel Range chunks / streaming
-to a temp file), configurable batch concurrency and per-file chunk concurrency, retry
-count and delay, separate connect/read/API timeouts, resume support, dedicated 403
-handling, `curl_cffi` browser-fingerprint fallback, a dedup manifest plus **local
-sha256 integrity re-check** so a corrupted file is never mistaken for "already
-downloaded".
-
-**Transfer-parameter dashboard** — the 14 rate/frequency knobs (concurrency, retries,
-retry delay, connect/read/API timeouts, chunk size and workers, size thresholds,
-inter-element wait, poll count, auto-increment) live in one collapsible bar. They are
-**saved per drawing** (`.wbt` key `transfer`), snapshotted once when a run starts, and
-each worker thread holds its own immutable copy — groundwork for concurrent
-multi-drawing downloads. Defaults equal the pre-feature constants byte for byte.
-
-**Image-source configurator** — API entry → sub-endpoint → parameters (name / type /
-value / **note**); custom headers with `${ENV:VAR}` placeholders, live timestamp
-headers, cookie import & verification, bulk paste; a real-request debugger with
-response diagnostics; and **import/share an entry** as a single `.apientry.json`.
-
-**Logging & output** — logs stream to `logs/run_<timestamp>/session.log`, windowed at
-1000 lines with on-demand paging, plain-text and syntax-highlighted views that always
-agree; the output panel tracks every download with a progress bar and a click-through
-to Windows Explorer.
-
-**Interop with ImageSearchTool** — "🔁 Download done → gallery indexing" writes a
-handoff request, spawns a detached transition process, then quits to free memory.
-In the other direction ImageSearchTool's "⇄ Switch" button starts PortPanel,
-preferring `main.py` (SHA256 whitelist verified) and falling back to the packaged
-`端口画板.exe` (no verification) when the host app isn't present.
-
-**Always dark.** The UI is forced to the dark theme regardless of your Windows theme,
-matching the author's environment. Both sidebars collapse to an 18-pixel edge strip,
-handing the full width to the canvas.
-
-## Packaging it yourself
-
-```bash
-python -m pip install pyinstaller==6.15.0
-python -m PyInstaller --noconfirm --clean port_panel.spec
-# output: dist_panel/端口画板/端口画板.exe  (onedir — ship the whole folder)
-```
-
-## Privacy & security
-
-**Neither the repository nor the release archive contains any user data.** The
-following are deliberately **not distributed**:
-
-| Category | Why |
-|---|---|
-| `.wbt` drawings | They embed both the API entry (`api_ref`) and request headers **stored verbatim** (real cookies / session tokens) |
-| API entry content | Site URLs, endpoint paths, parameters, headers, cookies — that is your own configuration |
-| `data/api_config.json` | The real (encrypted) source config; the app generates it on first run |
-| `data/manifest/` | Download manifest — contains **local storage paths, content titles and file hashes** |
-| `data/webAPI/` and similar scrape output | Data you harvested, i.e. yours |
-
-Protections built into the app:
-
-- `data/api_config.json` is encrypted (Fernet with a machine-bound key), and its
-  `*.plain.backup` also goes through the ciphertext cache — plaintext stays in memory only;
-- The app only talks to the network when you press *Run* or *Debug*.
-
-Sharing **your own** drawing with someone else? `.wbt` carries request headers
-verbatim — strip cookies / Authorization first, or replace them with `${ENV:...}`
-placeholders.
-
-## License
-
-**AGPL-3.0-only** — see [LICENSE](LICENSE).
+AGPL-3.0。可自由使用、修改、分发；若作为网络服务提供，需同样开源你的修改。
