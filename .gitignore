@@ -93,3 +93,24 @@ cookies.txt
 # data/fonts/DIN1451-36breit-1.ttf 是商业字体（name 表无版权/许可字段），
 # 无再分发授权，且本仓库代码零引用 —— 只留在宿主本机。
 **/data/fonts/
+
+# 本地浏览器导出的密钥（由 tools/browser_cookies.py 生成，绝不入库）
+data/secrets.local.json
+data/**/*.local.json
+
+# ===== B站流水线的本地运行数据（隐私：收藏/关注帖、去重表、游标、失败记录）=====
+# 这些是用户自己的浏览数据，只在本机使用，不入库、不出包
+data/bili_seen.csv
+data/bili_failed.csv
+data/bili_state.json
+data/bili_*.csv
+**/bili_seen.csv
+**/bili_failed.csv
+
+# ===== 站点专用脚本（本地工具，不入公开仓库）=====
+tools/bili_pipeline.py
+tools/bili_wbi_helper.py
+tools/make_bili_drawing.py
+tools/edge_cookies_cdp.py
+tools/browser_cookies.py
+tools/verify_bili_page.py
