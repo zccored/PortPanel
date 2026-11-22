@@ -1,0 +1,105 @@
+name: Build & Release
+
+# 触发方式：
+#   1) 推 v* 标签 → 跑测试 → 打包 → 自动创建/更新 Release 并上传 zip
+#   2) 手动触发（workflow_dispatch）→ 只跑测试 + 产出构建产物（artifact），不发布
+on:
+  push:
+    tags: ['v*']
+    branches: ['main']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write      # 创建 Release / 上传资产需要
+
+jobs:
+  test:
+    name: Tests (Windows / Py3.12)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests (offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest tests/ -q
+
+  build:
+    name: Package (PyInstaller)
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with spec
+        run: pyinstaller port_panel.spec --noconfirm
+
+      - name: Verify no private files in package
+        shell: pwsh
+        run: |
+          $bad = Get-ChildItem -Path dist -Recurse -File |
+            Where-Object { $_.Name -match '\.wbt$|secrets|api_config|\.local\.json$' }
+          if ($bad) { $bad | ForEach-Object { Write-Host "::error::$($_.FullName)" }; exit 1 }
+          Write-Host "package clean"
+
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          $name = "PortPanel-${env:GITHUB_REF_NAME}-win64"
+          Compress-Archive -Path "dist\*" -DestinationPath "$name.zip" -CompressionLevel Optimal
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload artifact (manual runs)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PortPanel-win64
+          path: ${{ env.ASSET }}
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          generate_release_notes: true
+          body: |
+            ## 安装
+            1. 下载下方 `PortPanel-*-win64.zip`
+            2. 解压到任意目录（不要放在压缩包内直接运行）
+            3. 双击 `端口画板.exe`
+
+            无需安装 Python；数据保存在解压目录的 `data/` 下。
+
+            ## 本版要点
+            - 逻辑门节点：与门 / 非门 / 异或门，输入只认 `true` / `false`
+            - 断点管理面板（节点观察器）+ 面板贴边自动隐藏
+            - 数据注入与落盘一致性修复（空值不再覆盖数组、同条目去重、错误包不入盘）
+            - 画布拖动重绘残影修复
+            - 面向新手的 README 重写
+
+            > 图纸（`.wbt`）、本地密钥与运行数据不会打进包里。
