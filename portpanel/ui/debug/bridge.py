@@ -22,6 +22,8 @@ class DebugBridge(QObject):
     pauseRequested = Signal(object, object)     # (node, HttpRequest) —— 主线程接
     resumed = Signal(object)                    # (node,)
     liveEvent = Signal(object)                  # {'phase','method','url','status'} 实时报文
+    armedChanged = Signal(int)                  # 断点数量变化（红点开关后通知 UI 刷新）
+    nodeArmedChanged = Signal(object, bool)     # 某个节点的断点被切换（节点红点 ↔ 面板红点 同步）
 
     def __init__(self):
         super().__init__()
@@ -38,6 +40,14 @@ class DebugBridge(QObject):
             self._armed.add(node)
         else:
             self._armed.discard(node)
+        try:
+            self.armedChanged.emit(len(self._armed))
+        except Exception:
+            pass
+        try:
+            self.nodeArmedChanged.emit(node, bool(on))
+        except Exception:
+            pass
         # 程序化开关时同步红点（不触发 toggled，避免递归）
         dot = getattr(node, 'breakpoint_dot', None)
         if dot is not None and getattr(dot, 'armed', None) != on:
@@ -45,6 +55,27 @@ class DebugBridge(QObject):
 
     def is_armed(self, node) -> bool:
         return node in self._armed
+
+    def retain(self, nodes):
+        """只保留仍在画布上的节点。
+
+        重开图纸后，bridge 里可能还留着上一张图纸的节点对象（身份不再匹配），
+        表现为“按钮显示有断点、点开却是别的节点”。这里按当前场景清洗一次。
+        """
+        alive = set(nodes)
+        stale = [n for n in list(self._armed) if n not in alive]
+        for n in stale:
+            self._armed.discard(n)
+        if stale:
+            try:
+                self.armedChanged.emit(len(self._armed))
+            except Exception:
+                pass
+        return len(stale)
+
+    def armed_nodes(self):
+        """当前已开启断点的节点列表（顺序按开启先后，管理面板用）。"""
+        return list(self._armed)
 
     def armed_count(self) -> int:
         return len(self._armed)

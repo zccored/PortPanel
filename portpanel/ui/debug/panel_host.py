@@ -102,7 +102,10 @@ def open_for_node(node, pos=None, view=None) -> InspectPanel:
 
     try:
         from portpanel.ui.debug.bridge import get_bridge
-        _panel.set_armed(get_bridge().is_armed(node))
+        try:
+            _panel.bind_node(node)
+        except Exception:
+            _panel.set_armed(get_bridge().is_armed(node))
     except Exception:
         pass
 

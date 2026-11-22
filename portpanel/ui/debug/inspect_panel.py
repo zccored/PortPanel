@@ -85,6 +85,7 @@ class InspectPanel(QWidget):
         self._live_rows = {}
         self._release_ok = True
         self._armed_state = False
+        self._node = None            # 当前面板对应的元素框节点（断点以 bridge 为准）
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(self.MARGIN, self.MARGIN - 2,
@@ -157,6 +158,12 @@ class InspectPanel(QWidget):
         self._rz_origin = None
         self._rz_geo = None
         self.setMouseTracking(True)
+        # 贴边自动隐藏：拖到屏幕边缘松手就吸附收起，鼠标移上去自动展开
+        try:
+            from portpanel.ui.edge_dock import EdgeDock
+            self._edge = EdgeDock(self).attach()
+        except Exception:
+            self._edge = None
 
     # ---------- 样式 ----------
     @staticmethod
@@ -206,6 +213,8 @@ class InspectPanel(QWidget):
                 return True
             if event.type() == QEvent.MouseButtonRelease:
                 self._drag = None
+                if getattr(self, '_edge', None) is not None:
+                    self._edge.on_drag_end()
                 return True
         return super().eventFilter(obj, event)
 
@@ -215,7 +224,9 @@ class InspectPanel(QWidget):
         super().leaveEvent(event)
 
     def enterEvent(self, event):
-        if self._veil is not None:
+        # 吸边滑动过程中鼠标会“进入”面板，此时若启动虚化淡入，等于每帧全屏重绘，
+        # 滑动必然卡顿；等动画结束再让虚化层恢复。
+        if not getattr(self, '_edge_animating', False) and self._veil is not None:
             self._veil.fade_to(1.0)
         super().enterEvent(event)
 
@@ -247,7 +258,34 @@ class InspectPanel(QWidget):
         self.dot_btn.setToolTip('断点已开启' if on else '断点未开启')
         self.state_label.setText('已断点' if on else '')
 
+    def bind_node(self, node):
+        """把面板绑定到某个元素框：断点状态从 bridge 读，双向同步。"""
+        self._node = node
+        try:
+            from portpanel.ui.debug.bridge import get_bridge
+            _b = get_bridge()
+            if not getattr(self, '_armed_connected', False):
+                _b.nodeArmedChanged.connect(self._on_node_armed)
+                self._armed_connected = True
+            self.set_armed(_b.is_armed(node))
+        except Exception:
+            pass
+
+    def _on_node_armed(self, node, on):
+        """节点上的红点被点 → 同步到面板（只处理自己绑定的那个节点）。"""
+        if node is getattr(self, '_node', None):
+            self.set_armed(on)
+
     def _toggle_dot(self):
+        """点面板上的红点 = 改 bridge 的状态（再回灌到节点红点与工具栏）。"""
+        node = getattr(self, '_node', None)
+        if node is not None:
+            try:
+                from portpanel.ui.debug.bridge import get_bridge
+                get_bridge().set_armed(node, not self._armed_state)
+                return
+            except Exception:
+                pass
         self.set_armed(not self._armed_state)
 
     # ---------- 数据 ----------
